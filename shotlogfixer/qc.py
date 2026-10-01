@@ -2,7 +2,7 @@
 
 from .models import MatchResult
 
-PROBLEM_STATUSES = {"EIVA_ONLY", "REVIEW", "RECORDER_INVALID"}
+PROBLEM_STATUSES = {"EIVA_ONLY", "NO_SHOT", "REVIEW", "RECORDER_INVALID"}
 
 
 def problem_result_indices(results: list[MatchResult], status: str) -> list[int]:
@@ -31,6 +31,21 @@ def anomaly_event_count(results: list[MatchResult]) -> int:
 
 def anomaly_frequency_per_1000(results: list[MatchResult], eiva_count: int) -> float:
     return anomaly_event_count(results) / eiva_count * 1000 if eiva_count else 0.0
+
+
+def total_issue_count(results: list[MatchResult]) -> int:
+    """Count problem records, collapsing each resolved NO_SHOT pair to one issue."""
+    count = 0
+    no_shot_recorder_lines: set[int] = set()
+    for result in results:
+        if result.status == "NO_SHOT" and result.recorder_record:
+            line = result.recorder_record.source_line_number
+            if line not in no_shot_recorder_lines:
+                no_shot_recorder_lines.add(line)
+                count += 1
+        elif result.status in {"EIVA_ONLY", "RECORDER_INVALID", "REVIEW"}:
+            count += 1
+    return count
 
 
 def ffid_discontinuities(eiva_records) -> list[tuple[str, str]]:

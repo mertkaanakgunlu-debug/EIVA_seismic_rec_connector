@@ -92,12 +92,20 @@ main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 0 28px; flex: 1;
 .summary-eiva_only b { color: var(--eiva-only); }
 .summary-recorder_invalid b { color: var(--invalid); }
 .summary-review b { color: var(--review); }
+.summary-no_shot b { color: var(--review); }
 .counter-nav { display: inline-flex; align-items: center; gap: 2px; color: var(--muted); font-size: 11px; margin-left: 3px; }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }
 .icon-button:hover:not(:disabled) { color: var(--text); background: var(--surface-raised); border-color: var(--border); }
 .icon-button:disabled { opacity: .35; cursor: default; }
 .summary-detail { display: flex; gap: 26px; margin-top: 10px; color: var(--muted); font-size: 12px; }
 .summary-detail b { color: var(--text); font-weight: 600; }
+.correction-line { display: flex; gap: 10px; align-items: baseline; margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border); }
+.correction-line strong { font-size: 12px; }
+.correction-line span { color: var(--muted); }
+.correction-ready strong { color: var(--matched); }
+.correction-blocked strong { color: var(--eiva-only); }
+.correction-preview { display: flex; flex-wrap: wrap; gap: 7px 20px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.correction-preview b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .timeline-section, .table-section { padding: 14px 0 13px; border-bottom: 1px solid var(--border); }
 .section-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; margin-bottom: 9px; }
@@ -115,6 +123,7 @@ main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 0 28px; flex: 1;
 .marker-eiva_only { background: var(--eiva-only); color: var(--eiva-only); width: 6px; }
 .marker-review { background: var(--review); color: var(--review); width: 6px; }
 .marker-recorder_invalid { background: var(--invalid); color: var(--invalid); width: 6px; }
+.marker-no_shot { background: var(--review); color: var(--review); width: 6px; }
 
 .table-section { min-height: 340px; display: flex; flex-direction: column; }
 .table-heading { margin-bottom: 8px; }
@@ -135,8 +144,10 @@ tbody tr[data-selected="true"] td { background: var(--selected); }
 .status-cell.status-eiva_only { color: var(--eiva-only); }
 .status-cell.status-review { color: var(--review); }
 .status-cell.status-recorder_invalid { color: var(--invalid); }
+.status-cell.status-no_shot { color: var(--review); }
 .empty-table { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: var(--muted); font-size: 12px; }
 .app-footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 11px 28px 15px; color: var(--muted); font-size: 11px; }
+.footer-actions { display: flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; }
 .toast { position: fixed; right: 25px; bottom: 22px; z-index: 20; padding: 10px 13px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 7px 20px rgba(0,0,0,.22); }
 
 @media (max-width: 760px) {

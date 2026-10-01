@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 const projectRoot = process.env.SHOTLOGFIXER_PROJECT_ROOT || path.resolve(__dirname, "../..");
 
@@ -82,6 +83,40 @@ ipcMain.handle("select-qc-export-path", async () => {
 
 ipcMain.handle("export-qc", (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string }) =>
   runEngine({ action: "export_qc", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath }));
+
+function fixedStem(filePath: string) {
+  const parsed = path.parse(filePath);
+  return path.join(parsed.dir, `${parsed.name}_fixed.txt`);
+}
+
+ipcMain.handle("select-fixed-eiva-path", async (_event, payload: { eivaPath: string }) => {
+  const result = await dialog.showSaveDialog({ title: "Save Fixed EIVA", defaultPath: fixedStem(payload.eivaPath), filters: [{ name: "Text files", extensions: ["txt"] }] });
+  return result.canceled ? null : result.filePath || null;
+});
+
+ipcMain.handle("select-fixed-pair-path", async (_event, payload: { eivaPath: string; recorderPath: string }) => {
+  const result = await dialog.showSaveDialog({ title: "Save Fixed Pair (choose EIVA file)", defaultPath: fixedStem(payload.eivaPath), filters: [{ name: "Text files", extensions: ["txt"] }] });
+  if (result.canceled || !result.filePath) return null;
+  return { eivaPath: result.filePath, recorderPath: path.join(path.dirname(result.filePath), `${path.parse(payload.recorderPath).name}_fixed.txt`) };
+});
+
+async function confirmOverwrite(paths: string[]) {
+  const existing = paths.filter((filePath) => filePath && existsSync(filePath));
+  if (!existing.length) return true;
+  const answer = await dialog.showMessageBox({ type: "warning", buttons: ["Cancel", "Overwrite"], defaultId: 0, cancelId: 0,
+    title: "Confirm overwrite", message: "A fixed output already exists.", detail: existing.join("\n") });
+  return answer.response === 1;
+}
+
+ipcMain.handle("save-fixed-eiva", async (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string }) => {
+  if (!(await confirmOverwrite([payload.outputPath]))) return { ok: false, error: { code: "SAVE_CANCELLED", message: "Save cancelled." } };
+  return runEngine({ action: "save_fixed_eiva", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath, overwrite: true });
+});
+
+ipcMain.handle("save-fixed-pair", async (_event, payload: { eivaPath: string; recorderPath: string; eivaOutput: string; recorderOutput: string }) => {
+  if (!(await confirmOverwrite([payload.eivaOutput, payload.recorderOutput]))) return { ok: false, error: { code: "SAVE_CANCELLED", message: "Save cancelled." } };
+  return runEngine({ action: "save_fixed_pair", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, eiva_output: payload.eivaOutput, recorder_output: payload.recorderOutput, overwrite: true });
+});
 
 app.whenReady().then(() => {
   const window = createWindow();

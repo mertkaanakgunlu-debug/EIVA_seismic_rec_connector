@@ -23,7 +23,7 @@ export function timelinePositionForRecord(record: EngineRecord | undefined): num
 }
 
 export function formatCoordinate(x: number | null, y: number | null): string {
-  return x === null || y === null ? "" : `${x.toFixed(3)}, ${y.toFixed(3)}`;
+  return x === null || y === null ? "" : `${x.toFixed(2)}, ${y.toFixed(2)}`;
 }
 
 export function basename(filePath: string): string {

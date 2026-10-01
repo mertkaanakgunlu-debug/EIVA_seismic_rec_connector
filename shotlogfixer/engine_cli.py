@@ -11,9 +11,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .correction import (CorrectionNotValidatedError, prepare_correction, save_fixed_eiva,
+                         save_fixed_pair, sha256_file)
 from .matcher import match_records
 from .parsers import parse_eiva, parse_recorder
-from .qc import anomaly_event_count, ffid_discontinuities
+from .qc import ffid_discontinuities, total_issue_count
 from .report import export_csv
 
 
@@ -89,25 +91,85 @@ def analyse(eiva_path: Any, recorder_path: Any) -> dict[str, Any]:
     except (OSError, ValueError) as exc:
         return _error("INVALID_RECORDER_FILE", "Unable to parse the selected recorder log.", str(exc))
 
-    results = match_records(eiva_records, recorder_records)
+    try:
+        bundle = prepare_correction(eiva, recorder)
+    except (OSError, ValueError) as exc:
+        return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
+    results = bundle.results
     counts = {status: sum(result.status == status for result in results) for status in (
-        "MATCHED", "EIVA_ONLY", "RECORDER_INVALID", "REVIEW"
+        "MATCHED", "EIVA_ONLY", "NO_SHOT", "RECORDER_INVALID", "REVIEW"
     )}
+    # A resolved NO_SHOT appears once as a recorder event; unresolved windows
+    # remain visible as REVIEW records and therefore remain counted separately.
+    summary = {
+        "eiva_rows": len(eiva_records),
+        "recorder_rows": len(recorder_records),
+        "matched": counts["MATCHED"],
+        "eiva_only": counts["EIVA_ONLY"],
+        "recorder_invalid": counts["RECORDER_INVALID"],
+        "review": counts["REVIEW"],
+        "total_issues": total_issue_count(results),
+    }
+    if counts["NO_SHOT"]:
+        summary["no_shot"] = counts["NO_SHOT"]
+    validation = bundle.validation.as_dict() if bundle.validation else {"passed": False, "errors": ["missing validation"]}
     return {
         "ok": True,
-        "summary": {
-            "eiva_rows": len(eiva_records),
-            "recorder_rows": len(recorder_records),
-            "matched": counts["MATCHED"],
-            "eiva_only": counts["EIVA_ONLY"],
-            "recorder_invalid": counts["RECORDER_INVALID"],
-            "review": counts["REVIEW"],
-            "total_issues": anomaly_event_count(results),
+        "summary": summary,
+        "correction": {
+            "safe": bundle.plan.safe_to_build,
+            "retained": bundle.plan.matched_count,
+            "eiva_only_removed": bundle.plan.dropped_eiva_only_count,
+            "no_shot_removed": bundle.plan.dropped_no_shot_count,
+            "blocking_reasons": bundle.plan.blocking_reasons,
+            "actions": [{"action": action.action_type, "eiva_ffid": action.original_eiva_ffid,
+                         "target_ffid": action.target_ffid, "recorder_ffid": action.recorder_ffid,
+                         "eiva_source_index": action.eiva_source_index,
+                         "recorder_source_index": action.recorder_source_index,
+                         "status": action.status, "reason": action.reason,
+                         "distance_m": action.coordinate_distance_m} for action in bundle.plan.actions],
         },
+        "validation": validation,
+        "input_hashes": bundle.input_hashes,
         "ffid_jumps": [{"from": before, "to": after} for before, after in ffid_discontinuities(eiva_records)],
         "eiva_headers": list(eiva_records[0].original_values_by_column) if eiva_records else [],
         "records": [_serialize_result(result, eiva_records, index) for index, result in enumerate(results)],
     }
+
+
+def _prepare_for_save(eiva_path: Any, recorder_path: Any):
+    eiva = _validate_file(eiva_path, "EIVA")
+    if isinstance(eiva, dict): return eiva
+    recorder = _validate_file(recorder_path, "recorder")
+    if isinstance(recorder, dict): return recorder
+    try:
+        return prepare_correction(eiva, recorder)
+    except (OSError, ValueError) as exc:
+        return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
+
+
+def save_eiva(eiva_path: Any, recorder_path: Any, output_path: Any, overwrite: bool = False) -> dict[str, Any]:
+    bundle = _prepare_for_save(eiva_path, recorder_path)
+    if isinstance(bundle, dict): return bundle
+    if not isinstance(output_path, str) or not output_path.strip(): return _error("MISSING_OUTPUT_PATH", "Choose a fixed EIVA destination.")
+    try:
+        output = save_fixed_eiva(bundle, output_path, [Path(eiva_path), Path(recorder_path)], overwrite)
+    except FileExistsError as exc: return _error("OUTPUT_EXISTS", "The fixed EIVA output already exists; confirm overwrite.", str(exc))
+    except (CorrectionNotValidatedError, OSError, ValueError) as exc: return _error("SAVE_BLOCKED", "The fixed EIVA file was not written.", str(exc))
+    return {"ok": True, "path": str(output), "rows": bundle.validation.fixed_eiva_count, "validation": bundle.validation.as_dict(), "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
+
+
+def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_output: Any, overwrite: bool = False) -> dict[str, Any]:
+    bundle = _prepare_for_save(eiva_path, recorder_path)
+    if isinstance(bundle, dict): return bundle
+    if not isinstance(eiva_output, str) or not eiva_output.strip() or not isinstance(recorder_output, str) or not recorder_output.strip():
+        return _error("MISSING_OUTPUT_PATH", "Choose destinations for both fixed pair files.")
+    try:
+        outputs = save_fixed_pair(bundle, eiva_output, recorder_output, [Path(eiva_path), Path(recorder_path)], overwrite)
+    except FileExistsError as exc: return _error("OUTPUT_EXISTS", "A fixed pair output already exists; confirm overwrite.", str(exc))
+    except (CorrectionNotValidatedError, OSError, ValueError) as exc: return _error("SAVE_BLOCKED", "The fixed pair was not written.", str(exc))
+    return {"ok": True, "eiva_path": str(outputs[0]), "recorder_path": str(outputs[1]), "rows": bundle.validation.fixed_eiva_count,
+            "validation": bundle.validation.as_dict(), "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
 
 
 def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any) -> dict[str, Any]:
@@ -136,6 +198,10 @@ def dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         return analyse(payload.get("eiva_path"), payload.get("recorder_path"))
     if action in {"export", "export_qc"}:
         return export_qc(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"))
+    if action == "save_fixed_eiva":
+        return save_eiva(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), bool(payload.get("overwrite")))
+    if action == "save_fixed_pair":
+        return save_pair(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("eiva_output"), payload.get("recorder_output"), bool(payload.get("overwrite")))
     return _error("UNKNOWN_ACTION", f"Unsupported engine action: {action}")
 
 

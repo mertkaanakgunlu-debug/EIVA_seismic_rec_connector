@@ -27,6 +27,14 @@ The adapter can also be called directly with JSON on stdin:
 python -m shotlogfixer.engine_cli
 ```
 
-It accepts `analyse` and `export_qc` actions and returns structured JSON errors without exposing tracebacks to the UI. Set `SHOTLOGFIXER_PYTHON` when the development interpreter is not on `PATH`. A packaged build can provide the future PyInstaller sidecar through the same main-process boundary.
+It accepts `analyse`, `export_qc`, `save_fixed_eiva`, and `save_fixed_pair` actions and returns structured JSON errors without exposing tracebacks to the UI. Set `SHOTLOGFIXER_PYTHON` when the development interpreter is not on `PATH`. A packaged build can provide the future PyInstaller sidecar through the same main-process boundary.
 
-The existing Tkinter application remains available with `python app.py` as a fallback/reference during acceptance. Phase 2 correction is not implemented: this migration does not reclassify `NO_SHOT`, plan corrections, rename FFIDs, or write `_fixed.txt` output.
+## Phase 2 correction
+
+After analysis, ShotLogFixer classifies recorder rows as `VALID`, `NO_SHOT` (the complete `-214748.36480` sentinel pair), or `INVALID`. It builds a deterministic correction plan from the existing coordinate/order matcher. EIVA-only rows and safely bracketed no-shot navigation rows are removed; retained EIVA FFIDs are replaced with their matched recorder FFIDs. Ambiguous intervals, boundary no-shots, invalid rows, and unresolved review rows block output.
+
+The engineering tolerance is 1.0 m using full parsed precision. Fixed EIVA and recorder coordinates are formatted to exactly two decimal places while unrelated fields and source row order are preserved. **Save Fixed EIVA** writes one validated navigation file; **Save Fixed Pair** writes `<eiva-stem>_fixed.txt` and `<recorder-stem>_fixed.txt` as one validated operation. Existing outputs require explicit overwrite confirmation, and raw input files are SHA-256 checked and never modified.
+
+Correction is fail-closed: the Python writer refuses to write unless both the in-memory pair and its serialized two-decimal representation pass independent validation. Analysis remains available without saving, and a failed validation writes nothing.
+
+The existing Tkinter application remains available with `python app.py` as a fallback/reference during acceptance.
