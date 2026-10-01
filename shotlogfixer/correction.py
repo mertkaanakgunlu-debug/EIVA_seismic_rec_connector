@@ -12,7 +12,9 @@ import tempfile
 from dataclasses import dataclass, field
 
 from .matcher import match_records
-from .models import CorrectionAction, CorrectionPlan, EivaRecord, MatchResult, RecorderRecord, ValidationResult
+from .analysis_parameters import AnalysisParameters
+from .gap_analysis import analyse_recorder_gaps, validate_gap_events
+from .models import CorrectionAction, CorrectionPlan, EivaRecord, MatchResult, RecorderRecord, ValidationResult, RecorderGapEvent
 from .parsers import classify_recorder_row, decode_source, parse_eiva_text, parse_recorder_text
 from .validation import validate_candidates, validate_serialized
 
@@ -35,6 +37,8 @@ class CorrectionBundle:
     recorder_path: Path | None = None
     eiva_encoding: str = "utf-8"
     recorder_encoding: str = "utf-8"
+    parameters: AnalysisParameters = field(default_factory=lambda: AnalysisParameters(2.0))
+    recorder_gaps: list[RecorderGapEvent] = field(default_factory=list)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -45,13 +49,17 @@ def sha256_file(path: str | Path) -> str:
         return digest.hexdigest()
 
 
-def build_correction_plan(eiva: list[EivaRecord], recorder: list[RecorderRecord], results: list[MatchResult]) -> CorrectionPlan:
+def build_correction_plan(eiva: list[EivaRecord], recorder: list[RecorderRecord], results: list[MatchResult],
+                          recorder_gaps: list[RecorderGapEvent] | None = None) -> CorrectionPlan:
     """Resolve only equal, pure NO_SHOT windows between accepted matched anchors."""
     plan = CorrectionPlan(source_eiva_count=len(eiva), source_recorder_count=len(recorder))
+    recorder_gaps = recorder_gaps or []
+    plan.blocking_reasons.extend(g.diagnostic for g in recorder_gaps if g.blocks_correction)
     elines = {row.source_line_number: i for i, row in enumerate(eiva)}
     rlines = {row.source_line_number: i for i, row in enumerate(recorder)}
     classes = [classify_recorder_row(row) for row in recorder]
     statuses = {row.eiva_record.source_line_number: row.status for row in results if row.eiva_record}
+    result_by_ei = {elines[row.eiva_record.source_line_number]: row for row in results if row.eiva_record}
     anchors = [(elines[row.eiva_record.source_line_number], rlines[row.recorder_record.source_line_number], row)
                for row in results if row.status == "MATCHED" and row.eiva_record and row.recorder_record]
     matched = {ei: (ri, row) for ei, ri, row in anchors}
@@ -94,8 +102,13 @@ def build_correction_plan(eiva: list[EivaRecord], recorder: list[RecorderRecord]
             plan.actions.append(CorrectionAction("DROP_NO_SHOT", ei, row.original_ffid, None, ri,
                                                 recorder[ri].ffid, "NO_SHOT", "Equal bracketed NO_SHOT interval; paired by acquisition order"))
         elif statuses.get(row.source_line_number) == "EIVA_ONLY":
+            gap_ids = result_by_ei.get(ei).gap_event_ids if result_by_ei.get(ei) else []
+            reason = "No valid recorder coordinate counterpart"
+            if gap_ids:
+                reason = "Recorder spatial gap; EIVA position has no recorded shot counterpart"
             plan.actions.append(CorrectionAction("DROP_EIVA_ONLY", ei, row.original_ffid,
-                                                status="EIVA_ONLY", reason="No valid recorder coordinate counterpart"))
+                                                status="EIVA_ONLY", reason=reason,
+                                                gap_event_id=gap_ids[0] if gap_ids else None))
         else:
             plan.blocking_reasons.append(f"Unresolved REVIEW at EIVA line {row.source_line_number}")
     matched_ris = [ri for _, ri, _ in anchors]
@@ -125,8 +138,10 @@ def resolve_results(eiva, recorder, raw_results, plan):
             continue
         if row.eiva_record and row.eiva_record.source_line_number in drops:
             action = drops[row.eiva_record.source_line_number]
-            output.append(MatchResult(row.eiva_record, recorder[action.recorder_source_index], None,
-                                      "NO_SHOT", "No shot recorded; remove from fixed pair"))
+            resolved_row = MatchResult(row.eiva_record, recorder[action.recorder_source_index], None,
+                                      "NO_SHOT", "No shot recorded; remove from fixed pair")
+            resolved_row.gap_event_ids = list(row.gap_event_ids)
+            output.append(resolved_row)
         elif row.recorder_record and classify_recorder_row(row.recorder_record) == "NO_SHOT":
             output.append(MatchResult(None, row.recorder_record, None, "NO_SHOT",
                                       "No shot recorded; navigation association unresolved"))
@@ -200,26 +215,44 @@ def build_candidates(eiva_text, recorder_text, eiva, recorder, plan):
     return assemble(eiva_text, eiva, eiva_replacements), assemble(recorder_text, recorder, recorder_replacements)
 
 
-def prepare_correction(eiva_path: str | Path, recorder_path: str | Path) -> CorrectionBundle:
+def prepare_correction(eiva_path: str | Path, recorder_path: str | Path,
+                       parameters: AnalysisParameters | None = None) -> CorrectionBundle:
+    legacy_direct_call = parameters is None
+    parameters = parameters or AnalysisParameters(2.0)
     eiva_path, recorder_path = Path(eiva_path).resolve(), Path(recorder_path).resolve()
     eiva_bytes, recorder_bytes = eiva_path.read_bytes(), recorder_path.read_bytes()
     hashes = {"eiva": hashlib.sha256(eiva_bytes).hexdigest(), "recorder": hashlib.sha256(recorder_bytes).hexdigest()}
     eiva_text, eencoding = decode_source(eiva_bytes)
     recorder_text, rencoding = decode_source(recorder_bytes)
     eiva, recorder = parse_eiva_text(eiva_text), parse_recorder_text(recorder_text)
-    raw_results = match_records(eiva, recorder)
-    plan = build_correction_plan(eiva, recorder, raw_results)
+    raw_results = match_records(eiva, recorder, parameters)
+    # Resolve the existing bracketed NO_SHOT semantics before gap attribution;
+    # the geometry analyzer must see those explicit events between anchors.
+    base_plan = build_correction_plan(eiva, recorder, raw_results, [])
+    base_results = resolve_results(eiva, recorder, raw_results, base_plan)
+    recorder_gaps = [] if legacy_direct_call else analyse_recorder_gaps(eiva, recorder, base_results, parameters)
+    # Carry gap provenance back to the canonical raw result stream used by the
+    # Phase 2 correction planner, while retaining resolved NO_SHOT rows for
+    # geometry validation.
+    raw_by_line = {row.eiva_record.source_line_number: row for row in raw_results if row.eiva_record}
+    for row in base_results:
+        if row.eiva_record and row.gap_event_ids:
+            raw_by_line[row.eiva_record.source_line_number].gap_event_ids = list(row.gap_event_ids)
+    plan = build_correction_plan(eiva, recorder, raw_results, recorder_gaps)
     results = resolve_results(eiva, recorder, raw_results, plan)
     bundle = CorrectionBundle(eiva, recorder, results, plan, input_hashes=hashes,
                               eiva_path=eiva_path, recorder_path=recorder_path, eiva_encoding=eencoding, recorder_encoding=rencoding)
+    bundle.parameters = parameters
+    bundle.recorder_gaps = recorder_gaps
     if plan.safe_to_build:
         bundle.eiva_text, bundle.recorder_text = build_candidates(eiva_text, recorder_text, eiva, recorder, plan)
-        bundle.validation = validate_candidates(eiva, recorder, plan, bundle.eiva_text, bundle.recorder_text, results)
+        bundle.validation = validate_candidates(eiva, recorder, plan, bundle.eiva_text, bundle.recorder_text, results, parameters, recorder_gaps)
     else:
         classes = [classify_recorder_row(row) for row in recorder]
         bundle.validation = ValidationResult(False, len(eiva), len(recorder), classes.count("VALID"),
                                               classes.count("NO_SHOT"), classes.count("INVALID"),
                                               unresolved_review_count=sum(row.status == "REVIEW" for row in results),
+                                              shot_interval_m=parameters.shot_interval_m, match_tolerance_m=parameters.match_tolerance_m,
                                               errors=list(plan.blocking_reasons))
     _verify_raw_hashes(bundle)
     return bundle
@@ -238,7 +271,8 @@ def _validate_for_write(bundle):
         raise CorrectionNotValidatedError("Correction validation did not pass")
     _verify_raw_hashes(bundle)
     validation = validate_candidates(bundle.eiva_records, bundle.recorder_records, bundle.plan,
-                                     bundle.eiva_text, bundle.recorder_text, bundle.results)
+                                     bundle.eiva_text, bundle.recorder_text, bundle.results,
+                                     bundle.parameters, bundle.recorder_gaps)
     if not validation.passed:
         raise CorrectionNotValidatedError('; '.join(validation.errors))
 

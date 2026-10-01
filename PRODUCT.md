@@ -8,7 +8,7 @@ desktop Electron application with a native Windows shell and a React renderer.
 
 ## Stack
 
-Electron, React, TypeScript, Vite, Tailwind CSS, stable shadcn/Radix-style local primitives, TanStack Table, and the existing Python domain engine.
+Electron, React, TypeScript, Vite, local compact UI primitives, and the existing Python domain engine. The release renderer uses a stable native table path.
 
 ## Users
 
@@ -16,7 +16,7 @@ Single-user seismic/QC operators on a survey vessel who need to inspect an EIVA 
 
 ## Product Purpose
 
-ShotLogFixer performs offline coordinate matching and QC review for two acquisition logs, surfaces anomalies in acquisition order, and exports an audit CSV. Success means an operator can select two files, analyse them quickly, inspect problem regions, and retain the accepted Phase 1 semantics.
+ShotLogFixer performs offline coordinate matching and QC review for two acquisition logs, surfaces record and geometry anomalies in acquisition order, and exports an audit TXT. Success means an operator can select two files, provide the shot interval, analyse them quickly, inspect problem regions, and retain the accepted correction semantics.
 
 ## Positioning
 
@@ -24,11 +24,11 @@ A compact offline engineering utility whose authoritative parser, monotonic matc
 
 ## Operating Context
 
-The application runs as a single desktop window on Windows, often in a survey-vessel workflow with local files and no network dependency. The acquisition timeline, problem navigation, QC table, and CSV export are the primary inspection rituals.
+The application runs as a single desktop window on Windows, often in a survey-vessel workflow with local files and no network dependency. The acquisition timeline, problem navigation, QC table, and TXT audit export are the primary inspection rituals.
 
 ## Capabilities and Constraints
 
-Preserve EIVA parsing, recorder parsing, acquisition-order matching, one-metre tolerance, ambiguity safeguards, uncertainty propagation, FFID discontinuity reporting, anomaly-event grouping, and QC CSV semantics. Keep the Tkinter UI available as fallback during migration. Phase 2 correction is intentionally out of scope. Source logs remain read-only.
+Preserve EIVA parsing, recorder parsing, acquisition-order matching, operator-derived half-interval tolerance, ambiguity safeguards, uncertainty propagation, FFID discontinuity reporting, geometry-event grouping, and QC TXT semantics. Keep the Tkinter UI available as fallback during migration. Source logs remain read-only.
 
 ## Brand Commitments
 

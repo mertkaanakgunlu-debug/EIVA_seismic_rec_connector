@@ -59,6 +59,7 @@ export function getCellValue(record: EngineRecord, key: string): string {
     case "recorder_x": return record.recorder_x === null ? "" : record.recorder_x.toFixed(2);
     case "recorder_y": return record.recorder_y === null ? "" : record.recorder_y.toFixed(2);
     case "diagnostic": return record.diagnostic;
+    case "gap": return record.gap_event_ids?.join(", ") || "";
     default: return key.startsWith("eiva_raw:") ? record.eiva_values[key.slice("eiva_raw:".length)] || "" : "";
   }
 }

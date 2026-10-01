@@ -5,7 +5,9 @@ import math
 import re
 import statistics
 
-from config import MAX_MATCH_DISTANCE_M, INVALID_COORDINATE
+from config import INVALID_COORDINATE
+from .analysis_parameters import AnalysisParameters
+from .gap_analysis import validate_gap_events
 from .models import CorrectionPlan, EivaRecord, MatchResult, RecorderRecord, ValidationResult
 from .parsers import classify_recorder_row, parse_eiva_text, parse_recorder_text
 
@@ -14,7 +16,7 @@ def _duplicates(values):
     return sorted(str(value) for value, count in Counter(values).items() if count > 1)
 
 
-def _distances(result, pairs):
+def _distances(result, pairs, parameters: AnalysisParameters):
     distances = []
     for eiva, recorder in pairs:
         if recorder.source_x is None or recorder.source_y is None:
@@ -26,7 +28,7 @@ def _distances(result, pairs):
             result.invalid_rows_remaining += 1
             continue
         distances.append(distance)
-        if distance <= MAX_MATCH_DISTANCE_M:
+        if distance <= parameters.match_tolerance_m:
             result.coordinate_pass_count += 1
         else:
             result.above_tolerance_count += 1
@@ -36,8 +38,10 @@ def _distances(result, pairs):
         result.median_distance_m = statistics.median(distances)
 
 
-def validate_serialized(eiva_text: str, recorder_text: str) -> ValidationResult:
+def validate_serialized(eiva_text: str, recorder_text: str, parameters: AnalysisParameters | None = None) -> ValidationResult:
+    parameters = parameters or AnalysisParameters(2.0)
     result = ValidationResult(False)
+    result.shot_interval_m, result.match_tolerance_m = parameters.shot_interval_m, parameters.match_tolerance_m
     try:
         eiva = parse_eiva_text(eiva_text)
         recorder = parse_recorder_text(recorder_text)
@@ -64,7 +68,7 @@ def validate_serialized(eiva_text: str, recorder_text: str) -> ValidationResult:
         for value in row.original_fields[1:3]:
             if not re.fullmatch(r"[+-]?\d+\.\d{2}", value):
                 result.errors.append(f"Recorder line {row.source_line_number}: coordinates are not two decimals")
-    _distances(result, zip(eiva, recorder))
+    _distances(result, zip(eiva, recorder), parameters)
     if not eiva or not recorder: result.errors.append("Engineering pair must contain valid shots")
     if len(eiva) != len(recorder): result.errors.append("Serialized row-count mismatch")
     if result.ffid_match_count != len(eiva): result.errors.append("Serialized row-by-row FFID mismatch")
@@ -73,19 +77,23 @@ def validate_serialized(eiva_text: str, recorder_text: str) -> ValidationResult:
     if result.missing_ffids or result.extra_ffids: result.errors.append("Missing or extra pair FFIDs")
     if result.no_shot_rows_remaining: result.errors.append("NO_SHOT remains in engineering pair")
     if result.invalid_rows_remaining: result.errors.append("Invalid coordinates remain in engineering pair")
-    if result.coordinate_pass_count != len(eiva): result.errors.append("Serialized coordinates fail the 1.0 m tolerance")
+    if result.coordinate_pass_count != len(eiva): result.errors.append(f"Serialized coordinates fail the {parameters.match_tolerance_m:g} m tolerance")
     result.passed = not result.errors
     return result
 
 
 def validate_candidates(source_eiva: list[EivaRecord], source_recorder: list[RecorderRecord],
                         plan: CorrectionPlan, eiva_text: str, recorder_text: str,
-                        results: list[MatchResult]) -> ValidationResult:
+                        results: list[MatchResult], parameters: AnalysisParameters | None = None,
+                        recorder_gaps=None) -> ValidationResult:
     """Check original precision, coverage and provenance; then reparse final text."""
+    parameters = parameters or AnalysisParameters(2.0)
+    recorder_gaps = recorder_gaps or []
     classes = [classify_recorder_row(row) for row in source_recorder]
     valid_indices = [i for i, kind in enumerate(classes) if kind == "VALID"]
     result = ValidationResult(False, len(source_eiva), len(source_recorder), len(valid_indices),
-                              classes.count("NO_SHOT"), classes.count("INVALID"))
+                              classes.count("NO_SHOT"), classes.count("INVALID"),
+                              shot_interval_m=parameters.shot_interval_m, match_tolerance_m=parameters.match_tolerance_m)
     result.errors.extend(plan.blocking_reasons)
     if not plan.safe_to_build: result.errors.append("Correction plan is unsafe")
     if result.invalid_recorder_count: result.errors.append("Source contains INVALID recorder rows")
@@ -118,12 +126,14 @@ def validate_candidates(source_eiva: list[EivaRecord], source_recorder: list[Rec
             result.errors.append("Action FFID provenance mismatch")
         if classes[ri] != "VALID": result.errors.append("Retained NO_SHOT or INVALID recorder row")
         source_pairs.append((eiva, recorder))
-    _distances(result, source_pairs)
-    if result.coordinate_pass_count != len(keep): result.errors.append("Original coordinates fail the 1.0 m tolerance")
+    _distances(result, source_pairs, parameters)
+    if result.coordinate_pass_count != len(keep): result.errors.append(f"Original coordinates fail the {parameters.match_tolerance_m:g} m tolerance")
+    if recorder_gaps:
+        result.errors.extend(validate_gap_events(source_eiva, source_recorder, results, recorder_gaps, parameters))
     no_shot_ids = {row.ffid for row, kind in zip(source_recorder, classes) if kind == "NO_SHOT"}
     if any(row.ffid in no_shot_ids for _, row in source_pairs): result.errors.append("NO_SHOT FFID retained")
 
-    serialized = validate_serialized(eiva_text, recorder_text)
+    serialized = validate_serialized(eiva_text, recorder_text, parameters)
     result.errors.extend(serialized.errors)
     result.fixed_eiva_count, result.fixed_recorder_count = serialized.fixed_eiva_count, serialized.fixed_recorder_count
     result.ffid_pair_count, result.ffid_match_count = serialized.ffid_pair_count, serialized.ffid_match_count

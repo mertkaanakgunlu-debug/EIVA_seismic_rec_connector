@@ -10,6 +10,37 @@ export interface AnalysisSummary {
   review: number;
   total_issues: number;
   no_shot?: number;
+  recorder_gap_count?: number;
+  unexplained_missing_positions?: number;
+}
+
+export interface RecorderGapEvent {
+  event_id: string;
+  left_recorder_source_index: number;
+  right_recorder_source_index: number;
+  left_recorder_ffid: string;
+  right_recorder_ffid: string;
+  left_x: number;
+  left_y: number;
+  right_x: number;
+  right_y: number;
+  distance_m: number;
+  shot_interval_m: number;
+  match_tolerance_m: number;
+  gap_span_steps: number;
+  estimated_missing_positions: number;
+  explicit_no_shot_count: number;
+  invalid_between_count: number;
+  unexplained_missing_positions: number;
+  left_eiva_source_index: number | null;
+  right_eiva_source_index: number | null;
+  intermediate_eiva_indices: number[];
+  eiva_only_indices: number[];
+  no_shot_eiva_indices: number[];
+  slot_assignments: Record<string, number>;
+  classification: string;
+  diagnostic: string;
+  blocks_correction: boolean;
 }
 
 export interface EngineRecord {
@@ -25,6 +56,7 @@ export interface EngineRecord {
   distance_m: number | null;
   status: Status;
   diagnostic: string;
+  gap_event_ids: string[];
   eiva_values: Record<string, string>;
 }
 
@@ -38,6 +70,7 @@ export interface CorrectionAction {
   status: Status;
   reason: string;
   distance_m: number | null;
+  gap_event_id?: string | null;
 }
 
 export interface CorrectionSummary {
@@ -73,6 +106,8 @@ export interface AnalysisSuccess {
   correction: CorrectionSummary;
   validation: ValidationSummary;
   input_hashes?: { eiva: string; recorder: string };
+  parameters: { shot_interval_m: number; match_tolerance_m: number };
+  recorder_gaps: RecorderGapEvent[];
 }
 
 export interface AnalysisFailure {

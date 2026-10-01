@@ -1,6 +1,6 @@
 # ShotLogFixer Phase 1
 
-Offline tkinter QC utility comparing an EIVA navigation CSV/TXT log with a whitespace-delimited seismic recorder header. It uses only `E(Spark), N(Spark)` against `SOU_X, SOU_Y` in acquisition order; FFID and timestamps are retained for audit but never used as matching keys. Matches use Euclidean distance with a 1.0 m tolerance. `MATCHED`, `EIVA_ONLY`, `RECORDER_INVALID`, and `REVIEW` describe the QC result. Source files are never modified.
+Offline QC utility comparing an EIVA navigation CSV/TXT log with a whitespace-delimited seismic recorder header. It uses only `E(Spark), N(Spark)` against `SOU_X, SOU_Y` in acquisition order; FFID and timestamps are retained for audit but never used as matching keys. The operator supplies the nominal shot interval; matching uses Euclidean distance with the derived half-interval tolerance. `MATCHED`, `EIVA_ONLY`, `NO_SHOT`, `RECORDER_INVALID`, and `REVIEW` describe record-level QC, while Recorder spatial gaps are separate geometry events. Source files are never modified.
 
 Run the GUI with `python app.py`. Run tests with `pytest`. Build on Windows with `pyinstaller --onefile --windowed app.py`.
 
@@ -39,8 +39,12 @@ It accepts `analyse`, `export_qc`, `save_fixed_eiva`, and `save_fixed_pair` acti
 
 After analysis, ShotLogFixer classifies recorder rows as `VALID`, `NO_SHOT` (the complete `-214748.36480` sentinel pair), or `INVALID`. It builds a deterministic correction plan from the existing coordinate/order matcher. EIVA-only rows and safely bracketed no-shot navigation rows are removed; retained EIVA FFIDs are replaced with their matched recorder FFIDs. Ambiguous intervals, boundary no-shots, invalid rows, and unresolved review rows block output.
 
-The engineering tolerance is 1.0 m using full parsed precision. Fixed EIVA and recorder coordinates are formatted to exactly two decimal places while unrelated fields and source row order are preserved. **Save Fixed EIVA** writes one validated navigation file; **Save Fixed Pair** writes `<eiva-stem>_fixed.txt` and `<recorder-stem>_fixed.txt` as one validated operation. Existing outputs require explicit overwrite confirmation, and raw input files are SHA-256 checked and never modified.
+The operator supplies `shot_interval_m`; Python derives `match_tolerance_m = shot_interval_m / 2` and uses that value for matching and both validation passes. Fixed EIVA and recorder coordinates are formatted to exactly two decimal places while unrelated fields and source row order are preserved. **Save Fixed EIVA** writes one validated navigation file; **Save Fixed Pair** writes `<eiva-stem>_fixed.txt` and `<recorder-stem>_fixed.txt` as one validated operation. Existing outputs require explicit overwrite confirmation, and raw input files are SHA-256 checked and never modified.
 
 Correction is fail-closed: the Python writer refuses to write unless both the in-memory pair and its serialized two-decimal representation pass independent validation. Analysis remains available without saving, and a failed validation writes nothing.
 
 The existing Tkinter application remains available with `python app.py` as a fallback/reference during acceptance.
+
+## Phase 3 geometry QC
+
+Recorder spatial gaps are separate acquisition-geometry events. Consecutive valid Recorder anchors are candidates when their coordinate distance exceeds `1.5 * shot_interval_m`; span steps are `round(distance / shot_interval_m)` and estimated missing intermediate positions are `span - 1`. The right anchor is never counted as missing, FFID differences are never used to estimate geometry, and explicit `NO_SHOT` rows are deducted from the unexplained metric. Shared and deterministic EIVA-only gaps remain warning-only; invalid, off-slot, or non-unique mappings are classified `RECORDER_GAP_AMBIGUOUS` and block correction. QC TXT includes parameter provenance, per-record gap attribution, and a `[RECORDER_GAPS]` audit section.

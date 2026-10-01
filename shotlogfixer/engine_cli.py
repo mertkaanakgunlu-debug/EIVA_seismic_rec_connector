@@ -13,6 +13,8 @@ from typing import Any
 
 from .correction import (CorrectionNotValidatedError, prepare_correction, save_fixed_eiva,
                          save_fixed_pair, sha256_file)
+from .analysis_parameters import AnalysisParameters
+from .gap_analysis import analyse_recorder_gaps
 from .matcher import match_records
 from .parsers import parse_eiva, parse_recorder
 from .qc import ffid_discontinuities, total_issue_count
@@ -67,11 +69,22 @@ def _serialize_result(result: Any, eiva_records: list[Any], index: int) -> dict[
         "distance_m": result.distance_m,
         "status": result.status,
         "diagnostic": result.diagnostic,
+        "gap_event_ids": result.gap_event_ids,
         "eiva_values": dict(eiva.original_values_by_column) if eiva else {},
     }
 
 
-def analyse(eiva_path: Any, recorder_path: Any) -> dict[str, Any]:
+def _parameters(value: Any) -> AnalysisParameters | dict[str, Any]:
+    if isinstance(value, str): value = value.replace(",", ".")
+    try:
+        return AnalysisParameters(value)
+    except ValueError as exc:
+        return _error("INVALID_SHOT_INTERVAL", "Enter a finite positive Shot Interval in metres.", str(exc))
+
+
+def analyse(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None) -> dict[str, Any]:
+    parameters = _parameters(shot_interval_m)
+    if isinstance(parameters, dict): return parameters
     eiva = _validate_file(eiva_path, "EIVA")
     if isinstance(eiva, dict):
         return eiva
@@ -92,7 +105,7 @@ def analyse(eiva_path: Any, recorder_path: Any) -> dict[str, Any]:
         return _error("INVALID_RECORDER_FILE", "Unable to parse the selected recorder log.", str(exc))
 
     try:
-        bundle = prepare_correction(eiva, recorder)
+        bundle = prepare_correction(eiva, recorder, parameters)
     except (OSError, ValueError) as exc:
         return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
     results = bundle.results
@@ -110,12 +123,17 @@ def analyse(eiva_path: Any, recorder_path: Any) -> dict[str, Any]:
         "review": counts["REVIEW"],
         "total_issues": total_issue_count(results),
     }
+    if shot_interval_m != 2.0:
+        summary.update({"recorder_gap_count": len(bundle.recorder_gaps),
+                        "unexplained_missing_positions": sum(g.unexplained_missing_positions for g in bundle.recorder_gaps)})
     if counts["NO_SHOT"]:
         summary["no_shot"] = counts["NO_SHOT"]
     validation = bundle.validation.as_dict() if bundle.validation else {"passed": False, "errors": ["missing validation"]}
     return {
         "ok": True,
         "summary": summary,
+        "parameters": parameters.as_dict(),
+        "recorder_gaps": [gap.as_dict() for gap in bundle.recorder_gaps],
         "correction": {
             "safe": bundle.plan.safe_to_build,
             "retained": bundle.plan.matched_count,
@@ -127,7 +145,7 @@ def analyse(eiva_path: Any, recorder_path: Any) -> dict[str, Any]:
                          "eiva_source_index": action.eiva_source_index,
                          "recorder_source_index": action.recorder_source_index,
                          "status": action.status, "reason": action.reason,
-                         "distance_m": action.coordinate_distance_m} for action in bundle.plan.actions],
+                         "distance_m": action.coordinate_distance_m, "gap_event_id": action.gap_event_id} for action in bundle.plan.actions],
         },
         "validation": validation,
         "input_hashes": bundle.input_hashes,
@@ -137,19 +155,21 @@ def analyse(eiva_path: Any, recorder_path: Any) -> dict[str, Any]:
     }
 
 
-def _prepare_for_save(eiva_path: Any, recorder_path: Any):
+def _prepare_for_save(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None):
+    parameters = _parameters(shot_interval_m)
+    if isinstance(parameters, dict): return parameters
     eiva = _validate_file(eiva_path, "EIVA")
     if isinstance(eiva, dict): return eiva
     recorder = _validate_file(recorder_path, "recorder")
     if isinstance(recorder, dict): return recorder
     try:
-        return prepare_correction(eiva, recorder)
+        return prepare_correction(eiva, recorder, parameters)
     except (OSError, ValueError) as exc:
         return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
 
 
-def save_eiva(eiva_path: Any, recorder_path: Any, output_path: Any, overwrite: bool = False) -> dict[str, Any]:
-    bundle = _prepare_for_save(eiva_path, recorder_path)
+def save_eiva(eiva_path: Any, recorder_path: Any, output_path: Any, overwrite: bool = False, shot_interval_m: Any = None) -> dict[str, Any]:
+    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m)
     if isinstance(bundle, dict): return bundle
     if not isinstance(output_path, str) or not output_path.strip(): return _error("MISSING_OUTPUT_PATH", "Choose a fixed EIVA destination.")
     try:
@@ -159,8 +179,8 @@ def save_eiva(eiva_path: Any, recorder_path: Any, output_path: Any, overwrite: b
     return {"ok": True, "path": str(output), "rows": bundle.validation.fixed_eiva_count, "validation": bundle.validation.as_dict(), "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
 
 
-def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_output: Any, overwrite: bool = False) -> dict[str, Any]:
-    bundle = _prepare_for_save(eiva_path, recorder_path)
+def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_output: Any, overwrite: bool = False, shot_interval_m: Any = None) -> dict[str, Any]:
+    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m)
     if isinstance(bundle, dict): return bundle
     if not isinstance(eiva_output, str) or not eiva_output.strip() or not isinstance(recorder_output, str) or not recorder_output.strip():
         return _error("MISSING_OUTPUT_PATH", "Choose destinations for both fixed pair files.")
@@ -172,7 +192,9 @@ def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_out
             "validation": bundle.validation.as_dict(), "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
 
 
-def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any) -> dict[str, Any]:
+def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interval_m: Any = None) -> dict[str, Any]:
+    parameters = _parameters(shot_interval_m)
+    if isinstance(parameters, dict): return parameters
     eiva = _validate_file(eiva_path, "EIVA")
     if isinstance(eiva, dict):
         return eiva
@@ -183,30 +205,32 @@ def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any) -> dict[str,
         return _error("MISSING_EXPORT_PATH", "Choose a destination for the QC TXT.")
     output = Path(output_path).expanduser()
     try:
-        results = match_records(parse_eiva(eiva), parse_recorder(recorder))
+        eiva_records, recorder_records = parse_eiva(eiva), parse_recorder(recorder)
+        raw_results = match_records(eiva_records, recorder_records, parameters)
+        gaps = analyse_recorder_gaps(eiva_records, recorder_records, raw_results, parameters)
         # `.txt` is the product format. Keep `.csv` as a legacy direct-API
         # compatibility path for existing integrations, never selected by the UI.
         if output.suffix.lower() == ".csv":
-            export_csv(output, results)
+            export_csv(output, raw_results)
         else:
-            export_txt(output, results)
+            export_txt(output, raw_results, parameters, gaps)
     except PermissionError as exc:
         return _error("EXPORT_PERMISSION_DENIED", "Unable to write the QC TXT file.", str(exc))
     except (OSError, ValueError) as exc:
         return _error("EXPORT_FAILED", "Unable to export the QC TXT file.", str(exc))
-    return {"ok": True, "path": str(output), "rows": len(results)}
+    return {"ok": True, "path": str(output), "rows": len(raw_results), "parameters": parameters.as_dict(), "recorder_gap_count": len(gaps)}
 
 
 def dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     action = payload.get("action", "analyse")
     if action == "analyse":
-        return analyse(payload.get("eiva_path"), payload.get("recorder_path"))
+        return analyse(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("shot_interval_m"))
     if action in {"export", "export_qc"}:
-        return export_qc(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"))
+        return export_qc(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), payload.get("shot_interval_m"))
     if action == "save_fixed_eiva":
-        return save_eiva(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), bool(payload.get("overwrite")))
+        return save_eiva(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), bool(payload.get("overwrite")), payload.get("shot_interval_m"))
     if action == "save_fixed_pair":
-        return save_pair(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("eiva_output"), payload.get("recorder_output"), bool(payload.get("overwrite")))
+        return save_pair(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("eiva_output"), payload.get("recorder_output"), bool(payload.get("overwrite")), payload.get("shot_interval_m"))
     return _error("UNKNOWN_ACTION", f"Unsupported engine action: {action}")
 
 

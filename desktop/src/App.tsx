@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import { basename, columnAlignment, ffidJumpTargets, getCellValue, nextCycle, resolveThemePreference, statusIndices, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX } from "./lib/logic";
-import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse } from "./lib/types";
+import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, RecorderGapEvent } from "./lib/types";
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
 
@@ -27,6 +27,7 @@ const BASE_COLUMNS: Array<{ key: string; label: string }> = [
   { key: "diagnostic", label: "Diagnostic" },
   { key: "recorder_x", label: "Recorder SOU_X" },
   { key: "recorder_y", label: "Recorder SOU_Y" },
+  { key: "gap", label: "Gap" },
 ];
 
 function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "download" }) {
@@ -70,6 +71,7 @@ export default function App() {
   const isolation = diagnosticOptions?.isolation || "full";
   const [eivaPath, setEivaPath] = useState("");
   const [recorderPath, setRecorderPath] = useState("");
+  const [shotIntervalText, setShotIntervalText] = useState("3.125");
   const [analysis, setAnalysis] = useState<AnalysisSuccess | null>(null);
   const [lifecycle, setLifecycle] = useState<Lifecycle>("idle");
   const [error, setError] = useState("");
@@ -140,7 +142,11 @@ export default function App() {
   const [navCurrent, setNavCurrent] = useState<Record<string, number | null>>({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null });
   const jumpTargets = useMemo(() => ffidJumpTargets(records, analysis?.ffid_jumps || []), [analysis, records]);
   const [jumpCurrent, setJumpCurrent] = useState<number | null>(null);
+  const [gapCurrent, setGapCurrent] = useState<number | null>(null);
   const allColumns = useMemo(() => [...BASE_COLUMNS, ...(analysis?.eiva_headers || []).map((header) => ({ key: `eiva_raw:${header}`, label: `EIVA ${header}` }))], [analysis]);
+  const shotInterval = Number(shotIntervalText.trim().replace(",", "."));
+  const validShotInterval = Number.isFinite(shotInterval) && shotInterval > 0;
+  const analysisStale = Boolean(analysis && (!validShotInterval || analysis.parameters.shot_interval_m !== shotInterval));
 
   const focusRecord = (index: number) => {
     if (!records[index]) return;
@@ -190,6 +196,18 @@ export default function App() {
     else navigateJump(1);
   };
 
+  const focusGap = (index: number) => {
+    const gap = analysis?.recorder_gaps[index];
+    if (!gap) return;
+    setGapCurrent(index);
+    const target = gap.eiva_only_indices[0] ?? gap.right_eiva_source_index ?? gap.left_eiva_source_index;
+    if (target !== null && target !== undefined) focusRecord(target);
+  };
+  const navigateGap = (step: 1 | -1) => {
+    const next = nextCycle(analysis?.recorder_gaps.map((_, index) => index) || [], gapCurrent, step);
+    if (next !== null) focusGap(next);
+  };
+
   const chooseFile = async (kind: "eiva" | "recorder") => {
     try {
       const selected = kind === "eiva" ? await window.shotlogfixer.selectEivaFile() : await window.shotlogfixer.selectRecorderFile();
@@ -201,39 +219,40 @@ export default function App() {
     diagnosticPhase("analyse-entered");
     markTiming("analyse-request-start");
     setError("");
+    if (!validShotInterval) { setError("Enter a finite positive Shot Interval before analysing."); setLifecycle("failed"); return; }
     if (!eivaPath && !recorderPath) { setError("Select both an EIVA log and a recorder log before analysing."); setLifecycle("failed"); return; }
     if (!eivaPath) { setError("Select an EIVA log before analysing."); setLifecycle("failed"); return; }
     if (!recorderPath) { setError("Select a recorder log before analysing."); setLifecycle("failed"); return; }
     setAnalysis(null); setSelectedIndex(null); setLifecycle("running");
     try {
       diagnosticPhase("analyse-ipc-invoke-start");
-      const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath);
+      const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath, shotInterval);
       diagnosticPhase("analyse-ipc-promise-resolved");
       markTiming("python-response-received", "analyse-request-start");
       if (diagnosticsEnabled) diagnosticPhase(`analyse-response-known:${JSON.stringify(response).length}-bytes`);
       if (!response.ok) { setError(errorMessage(response)); setLifecycle("failed"); return; }
-      setAnalysis(response); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null }); setJumpCurrent(null); setLifecycle("done");
+      setAnalysis(response); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null }); setJumpCurrent(null); setGapCurrent(null); setLifecycle("done");
     } catch { setError("The Python engine could not be reached."); setLifecycle("failed"); }
   };
 
   const exportQc = async () => {
-    if (!analysis) { setError("Analyse a valid file pair before exporting QC."); return; }
+    if (!analysis || analysisStale) { setError("Analysis settings changed — re-analyse before exporting QC."); return; }
     try {
       const outputPath = await window.shotlogfixer.selectQcExportPath(eivaPath);
       if (!outputPath) return;
-      const response = await window.shotlogfixer.exportQc(eivaPath, recorderPath, outputPath);
+      const response = await window.shotlogfixer.exportQc(eivaPath, recorderPath, outputPath, shotInterval);
       if (!response.ok) { setError(errorMessage(response)); return; }
       setToast("QC TXT exported successfully");
     } catch { setError("The QC TXT could not be exported."); }
   };
 
-  const correctionReady = Boolean(analysis?.correction.safe && analysis.validation.passed);
+  const correctionReady = Boolean(analysis && !analysisStale && analysis.correction.safe && analysis.validation.passed);
   const saveFixedEiva = async () => {
     if (!analysis || !correctionReady) return;
     try {
       const outputPath = await window.shotlogfixer.selectFixedEivaPath(eivaPath);
       if (!outputPath) return;
-      const response = await window.shotlogfixer.saveFixedEiva(eivaPath, recorderPath, outputPath);
+      const response = await window.shotlogfixer.saveFixedEiva(eivaPath, recorderPath, outputPath, shotInterval);
       if (!response.ok) { setError(errorMessage(response)); return; }
       setToast("Fixed EIVA saved successfully");
     } catch { setError("The fixed EIVA file could not be saved."); }
@@ -244,7 +263,7 @@ export default function App() {
     try {
       const outputs = await window.shotlogfixer.selectFixedPairPath(eivaPath, recorderPath);
       if (!outputs) return;
-      const response = await window.shotlogfixer.saveFixedPair(eivaPath, recorderPath, outputs.eivaPath, outputs.recorderPath);
+      const response = await window.shotlogfixer.saveFixedPair(eivaPath, recorderPath, outputs.eivaPath, outputs.recorderPath, shotInterval);
       if (!response.ok) { setError(errorMessage(response)); return; }
       setToast("Fixed pair created; original files unchanged");
     } catch { setError("The fixed pair could not be saved."); }
@@ -286,6 +305,14 @@ export default function App() {
     if (dragRef.current.moved) { dragRef.current.moved = false; return; }
     if (!timelineRef.current) return;
     const x = timelineLogicalX(event.clientX, timelineRef.current.getBoundingClientRect().left + timelineRef.current.clientLeft, timelineRef.current.scrollLeft);
+    const markerIndex = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
+    if (markerIndex !== null) { focusRecord(markerIndex); return; }
+    const gapIndex = (analysis?.recorder_gaps || []).findIndex((gap) => {
+      const left = gap.left_eiva_source_index == null ? 0 : timelineMarkerX(records[gap.left_eiva_source_index], timelineTrackWidth, timelineTotal);
+      const right = gap.right_eiva_source_index == null ? left : timelineMarkerX(records[gap.right_eiva_source_index], timelineTrackWidth, timelineTotal);
+      return x >= Math.min(left, right) && x <= Math.max(left, right);
+    });
+    if (gapIndex >= 0) { focusGap(gapIndex); return; }
     const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
     if (index !== null) focusRecord(index);
   };
@@ -293,6 +320,16 @@ export default function App() {
     if (!timelineRef.current || !records.length) return;
     if (dragRef.current.active && dragRef.current.moved) return;
     const x = timelineLogicalX(event.clientX, timelineRef.current.getBoundingClientRect().left + timelineRef.current.clientLeft, timelineRef.current.scrollLeft);
+    const gap = (analysis?.recorder_gaps || []).find((candidate) => {
+      const left = candidate.left_eiva_source_index == null ? 0 : timelineMarkerX(records[candidate.left_eiva_source_index], timelineTrackWidth, timelineTotal);
+      const right = candidate.right_eiva_source_index == null ? left : timelineMarkerX(records[candidate.right_eiva_source_index], timelineTrackWidth, timelineTotal);
+      return x >= Math.min(left, right) && x <= Math.max(left, right);
+    });
+    if (gap) {
+      setTimelineTooltip({ x: event.clientX - timelineRef.current.getBoundingClientRect().left, y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7,
+        text: `Recorder Gap\n${gap.left_recorder_ffid} → ${gap.right_recorder_ffid}\n${gap.distance_m.toFixed(3)} m | ${gap.gap_span_steps} span steps\n${gap.estimated_missing_positions} estimated missing intermediate positions\n${gap.explicit_no_shot_count} explicit NO_SHOT | ${gap.unexplained_missing_positions} unexplained\n${gap.classification}\n${gap.diagnostic}` });
+      return;
+    }
     const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
     if (index === null) { setTimelineTooltip(null); return; }
     const record = records[index];
@@ -313,6 +350,14 @@ export default function App() {
     const colors: Record<string, string> = { MATCHED: styles.getPropertyValue("--matched"), EIVA_ONLY: styles.getPropertyValue("--eiva-only"), REVIEW: styles.getPropertyValue("--review"), RECORDER_INVALID: styles.getPropertyValue("--invalid"), NO_SHOT: styles.getPropertyValue("--review") };
     context.clearRect(0, 0, timelineTrackWidth, 60);
     context.strokeStyle = styles.getPropertyValue("--border"); context.globalAlpha = 1; context.lineWidth = 1; context.beginPath(); context.moveTo(0, 30.5); context.lineTo(timelineTrackWidth, 30.5); context.stroke();
+    (analysis?.recorder_gaps || []).forEach((gap) => {
+      if (gap.left_eiva_source_index == null || gap.right_eiva_source_index == null) return;
+      const left = timelineMarkerX(records[gap.left_eiva_source_index], timelineTrackWidth, timelineTotal);
+      const right = timelineMarkerX(records[gap.right_eiva_source_index], timelineTrackWidth, timelineTotal);
+      context.globalAlpha = gap.blocks_correction ? .28 : .18;
+      context.fillStyle = gap.blocks_correction ? styles.getPropertyValue("--invalid") : styles.getPropertyValue("--review");
+      context.fillRect(Math.min(left, right), 22, Math.max(3, Math.abs(right - left)), 17);
+    });
     records.forEach((record, index) => {
       const x = timelineMarkerX(record, timelineTrackWidth, timelineTotal);
       const selected = selectedIndex === index;
@@ -324,7 +369,7 @@ export default function App() {
     context.globalAlpha = 1;
     markTiming("timeline-render-complete");
     diagnosticPhase("timeline-effect-complete");
-  }, [records, selectedIndex, timelineTotal, timelineTrackWidth, theme, isolation]);
+  }, [analysis, records, selectedIndex, timelineTotal, timelineTrackWidth, theme, isolation]);
 
   const columns = useMemo(() => visibleColumns.map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
@@ -347,10 +392,11 @@ export default function App() {
       <section className="input-section" aria-label="Input files">
         <div className="file-row"><label htmlFor="eiva-path">EIVA Log</label><input id="eiva-path" value={eivaPath ? basename(eivaPath) : "No file selected"} readOnly title={eivaPath} className={!eivaPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("eiva")}>Browse</button></div>
         <div className="file-row"><label htmlFor="recorder-path">Recorder Log</label><input id="recorder-path" value={recorderPath ? basename(recorderPath) : "No file selected"} readOnly title={recorderPath} className={!recorderPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("recorder")}>Browse</button></div>
+        <div className="shot-interval-row"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={shotIntervalText} onChange={(event) => setShotIntervalText(event.target.value)} aria-invalid={shotIntervalText.length > 0 && !validShotInterval} /><span className="unit">m</span><span className="tolerance-readout">Tolerance <b>{validShotInterval ? `${(shotInterval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></span></div>
         <div className="input-actions">
           <button className="button primary analyse-button" onClick={analyse} disabled={lifecycle === "running"}>{lifecycle === "running" ? "ANALYSING" : "ANALYSE"}</button>
           <div className="output-actions" aria-label="Output actions">
-            <button className="button secondary compact-button" onClick={exportQc} disabled={!analysis}><Icon name="download" />Export QC</button>
+            <button className="button secondary compact-button" onClick={exportQc} disabled={!analysis || analysisStale}><Icon name="download" />Export QC</button>
             <button className="button secondary compact-button" onClick={saveFixedEiva} disabled={!correctionReady}>Save Fixed EIVA</button>
             <button className="button primary compact-button" onClick={saveFixedPair} disabled={!correctionReady}>Save Fixed Pair</button>
           </div>
@@ -358,6 +404,7 @@ export default function App() {
       </section>
 
       {error && <div className="error-line" role="alert"><strong>{lifecycle === "failed" ? "Analysis issue" : "Export issue"}</strong><span>{error}</span></div>}
+      {analysisStale && <div className="stale-line" role="status"><strong>Analysis settings changed — re-analyse</strong><span>Output actions are disabled until Shot Interval matches the analysed value.</span></div>}
 
       <section className="summary-section" aria-label="Analysis summary">
         <div className="summary-line">
@@ -366,8 +413,9 @@ export default function App() {
           <Counter label="NO_SHOT" status="NO_SHOT" count={analysis ? analysis.summary.no_shot ?? 0 : undefined} current={navCurrent.NO_SHOT} ordinal={problemGroups.NO_SHOT.indexOf(navCurrent.NO_SHOT ?? -1) + 1} total={problemGroups.NO_SHOT.length} onNavigate={navigate} onFocus={focusIssue} />
           <Counter label="Invalid" status="RECORDER_INVALID" count={analysis?.summary.recorder_invalid} current={navCurrent.RECORDER_INVALID} ordinal={problemGroups.RECORDER_INVALID.indexOf(navCurrent.RECORDER_INVALID ?? -1) + 1} total={problemGroups.RECORDER_INVALID.length} onNavigate={navigate} onFocus={focusIssue} />
           <Counter label="Review" status="REVIEW" count={analysis?.summary.review} current={navCurrent.REVIEW} ordinal={problemGroups.REVIEW.indexOf(navCurrent.REVIEW ?? -1) + 1} total={problemGroups.REVIEW.length} onNavigate={navigate} onFocus={focusIssue} />
+          <GapCounter gaps={analysis?.recorder_gaps || []} current={gapCurrent} onFocus={focusGap} onNavigate={navigateGap} />
         </div>
-        <div className="summary-detail"><span>Total issues: <b>{analysis ? analysis.summary.total_issues : "—"}</b></span><JumpNavigation jumps={analysis?.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} /></div>
+        <div className="summary-detail"><span>Total issues: <b>{analysis ? analysis.summary.total_issues : "—"}</b></span><span>Missing positions: <b>{analysis ? analysis.summary.unexplained_missing_positions : "—"}</b></span><JumpNavigation jumps={analysis?.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} /></div>
         {analysis && <div className={`correction-line ${correctionReady ? "correction-ready" : "correction-blocked"}`}>
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
@@ -408,6 +456,15 @@ type NavigationStatus = "EIVA_ONLY" | "NO_SHOT" | "RECORDER_INVALID" | "REVIEW";
 
 function Counter({ label, status, count, current, ordinal, total, onNavigate, onFocus }: { label: string; status: NavigationStatus; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (status: NavigationStatus, step: 1 | -1) => void; onFocus: (status: NavigationStatus) => void }) {
   return <EventNavigation className={`summary-${status.toLowerCase()}`} label={label} value={count ?? "—"} total={total} ordinal={current === null ? 1 : ordinal} onFocus={() => onFocus(status)} onNavigate={(step) => onNavigate(status, step)} />;
+}
+
+function GapCounter({ gaps, current, onFocus, onNavigate }: { gaps: RecorderGapEvent[]; current: number | null; onFocus: (index: number) => void; onNavigate: (step: 1 | -1) => void }) {
+  const gap = gaps[current ?? 0];
+  return <span className="summary-item summary-recorder-gap">
+    {gaps.length ? <button className="summary-trigger" onClick={() => onFocus(current ?? 0)}>Recorder Gaps <b>{gaps.length}</b></button> : <>Recorder Gaps <b>0</b></>}
+    {gaps.length > 1 && <span className="counter-nav"><button className="icon-button" onClick={() => onNavigate(-1)} title="Previous Recorder gap"><Icon name="left" /></button><span>{(current ?? 0) + 1} / {gaps.length}</span><button className="icon-button" onClick={() => onNavigate(1)} title="Next Recorder gap"><Icon name="right" /></button></span>}
+    {gap && <span className="gap-classification" title={gap.diagnostic}>{gap.classification.replace("RECORDER_GAP_", "")}</span>}
+  </span>;
 }
 
 function JumpNavigation({ jumps, current, targets, onFocus, onNavigate }: { jumps: Array<{ from: string; to: string }>; current: number | null; targets: Array<number | null>; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {

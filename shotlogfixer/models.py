@@ -35,6 +35,65 @@ class MatchResult:
     distance_m: Optional[float]
     status: str
     diagnostic: str
+    gap_event_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RecorderGapEvent:
+    event_id: str
+    left_recorder_source_index: int
+    right_recorder_source_index: int
+    left_recorder_ffid: str
+    right_recorder_ffid: str
+    left_x: float
+    left_y: float
+    right_x: float
+    right_y: float
+    distance_m: float
+    shot_interval_m: float
+    match_tolerance_m: float
+    gap_span_steps: int
+    estimated_missing_positions: int
+    explicit_no_shot_count: int
+    invalid_between_count: int
+    unexplained_missing_positions: int
+    left_eiva_source_index: Optional[int] = None
+    right_eiva_source_index: Optional[int] = None
+    intermediate_eiva_indices: list[int] = field(default_factory=list)
+    eiva_only_indices: list[int] = field(default_factory=list)
+    no_shot_eiva_indices: list[int] = field(default_factory=list)
+    slot_assignments: dict[int, int] = field(default_factory=dict)
+    classification: str = "RECORDER_GAP_AMBIGUOUS"
+    diagnostic: str = ""
+    blocks_correction: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "left_recorder_source_index": self.left_recorder_source_index,
+            "right_recorder_source_index": self.right_recorder_source_index,
+            "left_recorder_ffid": self.left_recorder_ffid,
+            "right_recorder_ffid": self.right_recorder_ffid,
+            "left_x": self.left_x, "left_y": self.left_y,
+            "right_x": self.right_x, "right_y": self.right_y,
+            "distance_m": self.distance_m,
+            "shot_interval_m": self.shot_interval_m,
+            "match_tolerance_m": self.match_tolerance_m,
+            "gap_span_steps": self.gap_span_steps,
+            "estimated_missing_positions": self.estimated_missing_positions,
+            "explicit_no_shot_count": self.explicit_no_shot_count,
+            "invalid_between_count": self.invalid_between_count,
+            "unexplained_missing_positions": self.unexplained_missing_positions,
+            "left_eiva_source_index": self.left_eiva_source_index,
+            "right_eiva_source_index": self.right_eiva_source_index,
+            "intermediate_eiva_indices": self.intermediate_eiva_indices,
+            "eiva_only_indices": self.eiva_only_indices,
+            "no_shot_eiva_indices": self.no_shot_eiva_indices,
+            "slot_assignments": self.slot_assignments,
+            "classification": self.classification,
+            "diagnostic": self.diagnostic,
+            "blocks_correction": self.blocks_correction,
+        }
 
 
 @dataclass
@@ -48,6 +107,7 @@ class CorrectionAction:
     status: str = ""
     reason: str = ""
     coordinate_distance_m: Optional[float] = None
+    gap_event_id: Optional[str] = None
 
 
 @dataclass
@@ -93,9 +153,13 @@ class ValidationResult:
     unresolved_review_count: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    shot_interval_m: Optional[float] = None
+    match_tolerance_m: Optional[float] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "shot_interval_m": self.shot_interval_m,
+            "match_tolerance_m": self.match_tolerance_m,
             "passed": self.passed,
             "source_eiva_count": self.source_eiva_count,
             "source_recorder_count": self.source_recorder_count,

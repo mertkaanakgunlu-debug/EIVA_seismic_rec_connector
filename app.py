@@ -3,6 +3,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from shotlogfixer.matcher import match_records
+from shotlogfixer.analysis_parameters import AnalysisParameters
 from shotlogfixer.parsers import parse_eiva, parse_recorder
 from shotlogfixer.qc import (anomaly_event_count, anomaly_frequency_per_1000,
                              ffid_discontinuities, next_cycle,
@@ -22,6 +23,8 @@ class App(tk.Tk):
         self.theme_name = tk.StringVar(value="Light")
         self.theme = get_theme("Light")
         self.eiva_path, self.recorder_path = tk.StringVar(), tk.StringVar()
+        self.shot_interval = tk.StringVar(value="3.125")
+        self.analysis_parameters = None
         self.results, self.eiva_records = [], []
         self.nav_positions, self.nav_current = {}, {}
         self.column_vars, self.column_defs = {}, {}
@@ -51,8 +54,11 @@ class App(tk.Tk):
             ttk.Label(inputs, text=label, width=14, style="Panel.TLabel").grid(row=row, column=0, sticky="w", pady=4)
             ttk.Entry(inputs, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
             ttk.Button(inputs, text="Browse…", command=lambda v=variable: v.set(filedialog.askopenfilename())).grid(row=row, column=2, pady=4)
+        ttk.Label(inputs, text="Shot Interval", width=14, style="Panel.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(inputs, textvariable=self.shot_interval, width=12).grid(row=2, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(inputs, text="m  (tolerance = half interval)", style="Secondary.TLabel").grid(row=2, column=2, sticky="w", pady=4)
         inputs.columnconfigure(1, weight=1)
-        self.analyse_button = ttk.Button(inputs, text="ANALYSE", style="Accent.TButton", command=self.analyse); self.analyse_button.grid(row=0, column=3, rowspan=2, padx=(16, 0), sticky="ns")
+        self.analyse_button = ttk.Button(inputs, text="ANALYSE", style="Accent.TButton", command=self.analyse); self.analyse_button.grid(row=0, column=3, rowspan=3, padx=(16, 0), sticky="ns")
 
         self.summary = ttk.Frame(self, style="App.TFrame", padding=(18, 4, 18, 6)); self.summary.pack(fill="x")
         self.card_frame = ttk.Frame(self.summary, style="App.TFrame"); self.card_frame.pack(fill="x")
@@ -117,6 +123,8 @@ class App(tk.Tk):
         if not eiva_path and not recorder_path: self._show_error("Input files", "Please select both input files."); return
         if not eiva_path: self._show_error("Input files", "Please select an EIVA log file."); return
         if not recorder_path: self._show_error("Input files", "Please select a recorder header file."); return
+        try: parameters = AnalysisParameters(self.shot_interval.get().strip().replace(",", "."))
+        except ValueError as exc: self._show_error("Shot interval", "Enter a finite positive shot interval in metres.", str(exc)); return
         if not self._validate_path(eiva_path, "EIVA") or not self._validate_path(recorder_path, "recorder"): return
         self._clear_analysis()
         try: eiva_records = parse_eiva(eiva_path)
@@ -125,7 +133,7 @@ class App(tk.Tk):
         try: recorder = parse_recorder(recorder_path)
         except PermissionError as exc: self._show_error("Recorder file", "Unable to open the selected recorder file.", str(exc)); return
         except (OSError, ValueError) as exc: self._show_error("Recorder file", "Unable to parse the selected recorder file.", str(exc)); return
-        self.eiva_records, self.results = eiva_records, match_records(eiva_records, recorder); self._configure_columns(); self._populate_table(); self._update_counters(); self._draw_timeline()
+        self.eiva_records, self.results, self.analysis_parameters = eiva_records, match_records(eiva_records, recorder, parameters), parameters; self._configure_columns(); self._populate_table(); self._update_counters(); self._draw_timeline()
 
     def _configure_columns(self):
         self.column_defs = {"eiva_ffid":"EIVA FFID", "recorder_ffid":"Recorder FFID", "eiva_coord":"EIVA Coordinate", "recorder_coord":"Recorder Coordinate", "distance":"Distance (m)", "status":"Status", "diagnostic":"Diagnostic", "recorder_x":"Recorder SOU_X", "recorder_y":"Recorder SOU_Y"}
@@ -234,7 +242,7 @@ class App(tk.Tk):
         if not self.results: self._show_error("Export QC TXT", "Please analyse a valid EIVA and recorder file pair first."); return
         path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text", "*.txt")])
         if not path: return
-        try: export_txt(path, self.results)
+        try: export_txt(path, self.results, self.analysis_parameters)
         except PermissionError as exc: self._show_error("Export QC TXT", "Unable to write the QC TXT file.", str(exc))
         except OSError as exc: self._show_error("Export QC TXT", "Unable to write the QC TXT file.", str(exc))
 

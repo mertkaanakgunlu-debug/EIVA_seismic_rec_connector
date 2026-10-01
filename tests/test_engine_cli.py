@@ -13,9 +13,9 @@ def write_fixture(tmp_path):
 
 def test_analyse_json_contract_and_fields(tmp_path):
     eiva, recorder = write_fixture(tmp_path)
-    response = analyse(str(eiva), str(recorder))
+    response = analyse(str(eiva), str(recorder), 3.125)
     assert response["ok"] is True
-    assert response["summary"] == {
+    assert {key: response["summary"][key] for key in ("eiva_rows", "recorder_rows", "matched", "eiva_only", "recorder_invalid", "review", "total_issues")} == {
         "eiva_rows": 2,
         "recorder_rows": 2,
         "matched": 2,
@@ -29,7 +29,7 @@ def test_analyse_json_contract_and_fields(tmp_path):
 
 
 def test_structured_error_response(tmp_path):
-    response = dispatch({"action": "analyse", "eiva_path": str(tmp_path / "missing"), "recorder_path": ""})
+    response = dispatch({"action": "analyse", "eiva_path": str(tmp_path / "missing"), "recorder_path": "", "shot_interval_m": 3.125})
     assert response["ok"] is False
     assert response["error"]["code"] == "FILE_NOT_FOUND"
     assert "traceback" not in json.dumps(response).lower()
@@ -38,7 +38,10 @@ def test_structured_error_response(tmp_path):
 def test_qc_export_command_uses_python_report_logic(tmp_path):
     eiva, recorder = write_fixture(tmp_path)
     output = tmp_path / "out.txt"
-    response = dispatch({"action": "export_qc", "eiva_path": str(eiva), "recorder_path": str(recorder), "output_path": str(output)})
+    response = dispatch({"action": "export_qc", "eiva_path": str(eiva), "recorder_path": str(recorder), "output_path": str(output), "shot_interval_m": 3.125})
     assert response["ok"] is True
     assert output.read_text(encoding="utf-8").splitlines()[0].startswith("eiva_ffid\teiva_easting")
-    assert len(output.read_text(encoding="utf-8-sig").splitlines()) == 3
+    exported = output.read_text(encoding="utf-8-sig")
+    assert len(exported.splitlines()) >= 3
+    assert "# shot_interval_m=3.125" in exported
+    assert "# match_tolerance_m=1.5625" in exported

@@ -2,21 +2,25 @@ import math
 from collections import defaultdict
 
 from .models import EivaRecord, RecorderRecord, MatchResult
-from config import MAX_MATCH_DISTANCE_M, AMBIGUITY_MARGIN_M
+from config import AMBIGUITY_MARGIN_M
+from .analysis_parameters import AnalysisParameters
 
 
-def _candidate_indices(eiva: list[EivaRecord], recorder: RecorderRecord, start: int):
+def _candidate_indices(eiva: list[EivaRecord], recorder: RecorderRecord, start: int, parameters: AnalysisParameters):
     candidates = []
     for index in range(start, len(eiva)):
         distance = math.hypot(eiva[index].easting_spark - recorder.source_x,
                               eiva[index].northing_spark - recorder.source_y)
-        if distance <= MAX_MATCH_DISTANCE_M:
+        if distance <= parameters.match_tolerance_m:
             candidates.append((distance, index))
     return sorted(candidates)
 
 
-def match_records(eiva: list[EivaRecord], recorder: list[RecorderRecord]) -> list[MatchResult]:
+def match_records(eiva: list[EivaRecord], recorder: list[RecorderRecord], parameters: AnalysisParameters | None = None) -> list[MatchResult]:
     """Match recorder coordinates monotonically and preserve uncertainty windows."""
+    # Keep direct library compatibility while engine actions pass explicit
+    # AnalysisParameters from the user-controlled boundary.
+    parameters = parameters or AnalysisParameters(2.0)
     matched = {}
     eiva_status = {}
     recorder_events = defaultdict(list)
@@ -32,7 +36,7 @@ def match_records(eiva: list[EivaRecord], recorder: list[RecorderRecord]) -> lis
                 uncertainty_start = cursor
             continue
 
-        candidates = _candidate_indices(eiva, rec, cursor)
+        candidates = _candidate_indices(eiva, rec, cursor, parameters)
         if not candidates:
             recorder_events[cursor].append(MatchResult(
                 None, rec, None, "REVIEW",
