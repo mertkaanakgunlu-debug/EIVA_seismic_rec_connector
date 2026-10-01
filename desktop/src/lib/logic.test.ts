@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextCycle, resolveThemePreference, summaryForDisplay, timelinePositionForRecord } from "./logic";
+import { nextCycle, resolveThemePreference, summaryForDisplay, timelinePositionForRecord, timelineRecordIndexAtX } from "./logic";
 
 describe("navigation helpers", () => {
   it("wraps problem navigation in both directions", () => {
@@ -17,6 +17,12 @@ describe("navigation helpers", () => {
   it("maps records by acquisition position", () => {
     expect(timelinePositionForRecord({ acquisition_position: 183 } as never)).toBe(183);
     expect(timelinePositionForRecord(undefined)).toBe(1);
+  });
+
+  it("maps timeline hit testing by acquisition position", () => {
+    const records = [{ acquisition_position: 1 }, { acquisition_position: 50 }, { acquisition_position: 100 }] as never[];
+    expect(timelineRecordIndexAtX(records, 0, 1000, 100)).toBe(0);
+    expect(timelineRecordIndexAtX(records, 990, 1000, 100)).toBe(2);
   });
 
   it("keeps total issues as issue-region count", () => {

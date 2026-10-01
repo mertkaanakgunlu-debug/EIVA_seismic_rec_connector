@@ -56,7 +56,13 @@ function createWindow() {
       sandbox: true,
     },
   });
-  window.loadFile(path.join(__dirname, "../dist/index.html"));
+  const devUrlArg = process.argv.find((argument) => argument.startsWith("--dev-url="));
+  const devUrl = devUrlArg?.slice("--dev-url=".length);
+  if (!app.isPackaged && devUrl) {
+    void window.loadURL(devUrl);
+  } else {
+    void window.loadFile(path.join(__dirname, "../dist/index.html"));
+  }
   return window;
 }
 
@@ -118,10 +124,47 @@ ipcMain.handle("save-fixed-pair", async (_event, payload: { eivaPath: string; re
   return runEngine({ action: "save_fixed_pair", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, eiva_output: payload.eivaOutput, recorder_output: payload.recorderOutput, overwrite: true });
 });
 
+async function runSmoke(window: BrowserWindow) {
+  let failed = false;
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
+    failed = true;
+    console.error(`Smoke renderer load failed (${errorCode}): ${errorDescription}`);
+  });
+  window.webContents.once("did-finish-load", async () => {
+    try {
+      const result = await window.webContents.executeJavaScript(`(() => ({
+        heading: document.querySelector('h1')?.textContent || '',
+        rootMounted: Boolean(document.querySelector('#root')?.firstElementChild),
+        bridge: Boolean(window.shotlogfixer),
+        themeBefore: document.documentElement.dataset.theme || '',
+      }))()`);
+      if (failed || result.heading !== "ShotLogFixer" || !result.rootMounted || !result.bridge) {
+        console.error("Smoke check failed: renderer did not mount the ShotLogFixer UI and preload bridge.");
+        app.exit(1);
+        return;
+      }
+      const themeResult = await window.webContents.executeJavaScript(`(() => {
+        document.documentElement.dataset.theme = 'light';
+        return document.documentElement.dataset.theme;
+      })()`);
+      if (themeResult !== "light") {
+        console.error("Smoke check failed: renderer theme did not respond.");
+        app.exit(1);
+        return;
+      }
+      console.log("Electron smoke passed: React root, heading, preload bridge, and theme response verified.");
+      app.exit(0);
+    } catch (error) {
+      console.error("Smoke check failed:", error);
+      app.exit(1);
+    }
+  });
+}
+
 app.whenReady().then(() => {
   const window = createWindow();
   if (process.argv.includes("--smoke")) {
-    window.webContents.once("did-finish-load", () => setTimeout(() => app.quit(), 350));
+    void runSmoke(window);
   }
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

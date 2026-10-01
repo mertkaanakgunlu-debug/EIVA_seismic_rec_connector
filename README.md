@@ -21,6 +21,10 @@ npm run build
 npm run electron:smoke
 ```
 
+`npm run dev` starts Vite on `http://127.0.0.1:5173` and passes that URL explicitly to Electron. A normal build and the smoke command load `dist/index.html` directly with `file://`; the production renderer has no localhost dependency. Vite uses a relative asset base (`./`) so packaged Electron windows resolve JavaScript and CSS correctly.
+
+The renderer keeps the compact Phase 2 layout while using a virtualized QC table and a canvas acquisition timeline. Development-only performance marks cover theme changes, analysis response/state assignment, table rendering, and timeline rendering; production builds do not emit those diagnostics. Theme selection is a controlled menu backed by CSS variables and persisted preference, without runtime `color-scheme` switching.
+
 The adapter can also be called directly with JSON on stdin:
 
 ```text

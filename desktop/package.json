@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron . --dev-url=http://127.0.0.1:5173\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "vitest run",
     "build": "npm run typecheck && vite build && tsc -p tsconfig.electron.json",
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@tanstack/react-table": "^8.21.3",
+    "@tanstack/react-virtual": "^3.14.13",
     "electron": "^38.2.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

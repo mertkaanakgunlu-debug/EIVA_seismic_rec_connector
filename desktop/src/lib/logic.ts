@@ -22,6 +22,18 @@ export function timelinePositionForRecord(record: EngineRecord | undefined): num
   return Math.max(1, record?.acquisition_position ?? 1);
 }
 
+export function timelineRecordIndexAtX(records: EngineRecord[], x: number, trackWidth: number, total: number): number | null {
+  if (!records.length || trackWidth <= 0 || total <= 0) return null;
+  const acquisition = 1 + (Math.max(0, Math.min(trackWidth - 8, x)) / Math.max(1, trackWidth - 8)) * Math.max(1, total - 1);
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  records.forEach((record, index) => {
+    const distance = Math.abs(timelinePositionForRecord(record) - acquisition);
+    if (distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+  });
+  return bestIndex;
+}
+
 export function formatCoordinate(x: number | null, y: number | null): string {
   return x === null || y === null ? "" : `${x.toFixed(2)}, ${y.toFixed(2)}`;
 }

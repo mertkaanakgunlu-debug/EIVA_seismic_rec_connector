@@ -1,11 +1,21 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent, type WheelEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from "react";
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
-import { basename, formatCoordinate, nextCycle, resolveThemePreference, statusIndices, timelinePositionForRecord } from "./lib/logic";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { basename, formatCoordinate, nextCycle, resolveThemePreference, statusIndices, timelinePositionForRecord, timelineRecordIndexAtX } from "./lib/logic";
 import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, Status } from "./lib/types";
 import "./styles.css";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
+const IS_DEV = import.meta.env.DEV;
+
+function markTiming(name: string, start?: string) {
+  if (!IS_DEV || typeof performance === "undefined") return;
+  performance.mark(name);
+  if (start) {
+    try { performance.measure(name, start, name); } catch { /* The mark may be the first event in a fresh renderer. */ }
+  }
+}
 
 const DEFAULT_COLUMNS = ["eiva_ffid", "recorder_ffid", "eiva_coord", "recorder_coord", "distance", "status"];
 const BASE_COLUMNS: Array<{ key: string; label: string }> = [
@@ -34,6 +44,18 @@ function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "downl
 function StatusMark({ lifecycle }: { lifecycle: Lifecycle }) {
   const labels: Record<Lifecycle, string> = { idle: "Ready", running: "Analysing", done: "Analysis complete", failed: "Analysis failed" };
   return <span className={`status-mark status-mark-${lifecycle}`} aria-live="polite"><span className="status-mark-dot" />{labels[lifecycle]}</span>;
+}
+
+function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (value: ThemePreference) => void }) {
+  const [open, setOpen] = useState(false);
+  const options: Array<[ThemePreference, string]> = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
+  return <div className="theme-picker">
+    <span>Theme</span>
+    <button className="theme-picker-button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{options.find(([key]) => key === value)?.[1] || "System"}<span aria-hidden="true">⌄</span></button>
+    {open && <div className="theme-picker-menu" role="listbox" aria-label="Theme preference">
+      {options.map(([key, label]) => <button key={key} role="option" aria-selected={key === value} onClick={() => { markTiming("theme-option-selected"); onChange(key); setOpen(false); }}>{label}</button>)}
+    </div>}
+  </div>;
 }
 
 function getCellValue(record: EngineRecord, key: string): string {
@@ -69,12 +91,19 @@ export default function App() {
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [timelineLeft, setTimelineLeft] = useState(0);
+  const [timelineTooltip, setTimelineTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  const tableRowRefs = useRef<Record<number, HTMLTableRowElement | null>>({});
-  const dragRef = useRef({ active: false, x: 0, scrollLeft: 0 });
+  const timelineCanvasRef = useRef<HTMLCanvasElement>(null);
+  const tableViewportRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef({ active: false, moved: false, x: 0, scrollLeft: 0 });
 
   const theme = resolveThemePreference(themePreference, systemDark);
-  useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem("shotlogfixer-theme", themePreference); }, [theme, themePreference]);
+  useEffect(() => {
+    markTiming("theme-change-start");
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("shotlogfixer-theme", themePreference);
+    markTiming("theme-change-complete", "theme-change-start");
+  }, [theme, themePreference]);
   useEffect(() => {
     const media = window.matchMedia?.("(prefers-color-scheme: dark)");
     if (!media) return;
@@ -83,6 +112,7 @@ export default function App() {
     return () => media.removeEventListener?.("change", onChange);
   }, []);
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(""), 3600); return () => window.clearTimeout(timer); }, [toast]);
+  useEffect(() => { if (analysis) markTiming("analysis-state-assigned"); }, [analysis]);
 
   const records = analysis?.records || [];
   const problemGroups = useMemo(() => ({
@@ -96,7 +126,7 @@ export default function App() {
   const selectRecord = (index: number) => {
     if (!records[index]) return;
     setSelectedIndex(index);
-    window.setTimeout(() => tableRowRefs.current[index]?.scrollIntoView({ block: "center", behavior: "smooth" }), 0);
+    rowVirtualizer.scrollToIndex(index, { align: "center", behavior: "smooth" });
     const timeline = timelineRef.current;
     if (timeline) {
       const trackWidth = Math.max(1400, records.length * 5);
@@ -120,6 +150,7 @@ export default function App() {
   };
 
   const analyse = async () => {
+    markTiming("analyse-request-start");
     setError("");
     if (!eivaPath && !recorderPath) { setError("Select both an EIVA log and a recorder log before analysing."); setLifecycle("failed"); return; }
     if (!eivaPath) { setError("Select an EIVA log before analysing."); setLifecycle("failed"); return; }
@@ -127,6 +158,7 @@ export default function App() {
     setAnalysis(null); setSelectedIndex(null); setLifecycle("running");
     try {
       const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath);
+      markTiming("python-response-received", "analyse-request-start");
       if (!response.ok) { setError(errorMessage(response)); setLifecycle("failed"); return; }
       setAnalysis(response); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, RECORDER_INVALID: null, REVIEW: null }); setLifecycle("done");
     } catch { setError("The Python engine could not be reached."); setLifecycle("failed"); }
@@ -177,22 +209,74 @@ export default function App() {
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     const timeline = timelineRef.current;
     if (!timeline) return;
-    dragRef.current = { active: true, x: event.clientX, scrollLeft: timeline.scrollLeft };
+    dragRef.current = { active: true, moved: false, x: event.clientX, scrollLeft: timeline.scrollLeft };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (!dragRef.current.active || !timelineRef.current) return;
-    timelineRef.current.scrollLeft = dragRef.current.scrollLeft - (event.clientX - dragRef.current.x);
+    const delta = event.clientX - dragRef.current.x;
+    if (Math.abs(delta) > 3) dragRef.current.moved = true;
+    timelineRef.current.scrollLeft = dragRef.current.scrollLeft - delta;
   };
   const handlePointerUp = () => { dragRef.current.active = false; };
+  const handleTimelineClick = (event: MouseEvent<HTMLCanvasElement>) => {
+    if (dragRef.current.moved || !timelineRef.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left + timelineRef.current.scrollLeft;
+    const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
+    if (index !== null) selectRecord(index);
+  };
+  const handleTimelineMove = (event: MouseEvent<HTMLCanvasElement>) => {
+    if (!timelineRef.current || !records.length) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left + timelineRef.current.scrollLeft;
+    const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
+    if (index === null) return;
+    const record = records[index];
+    const markerX = ((timelinePositionForRecord(record) - 1) / Math.max(1, timelineTotal - 1)) * (timelineTrackWidth - 8);
+    if (Math.abs(markerX - x) > 9) { setTimelineTooltip(null); return; }
+    setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: record.status === "MATCHED" ? `EIVA ${record.eiva_ffid || "—"} → Recorder ${record.recorder_ffid || "—"}\n${record.distance_m?.toFixed(3) || "—"} m` : `EIVA ${record.eiva_ffid || "—"}\n${record.status}` });
+  };
+  const handleTimelineLeave = () => setTimelineTooltip(null);
+
+  const timelineTrackWidth = Math.max(1400, records.length * 5);
+  const timelineTotal = analysis?.summary.eiva_rows || records.length;
+  useEffect(() => {
+    const canvas = timelineCanvasRef.current;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const styles = getComputedStyle(document.documentElement);
+    const colors: Record<string, string> = { MATCHED: styles.getPropertyValue("--matched"), EIVA_ONLY: styles.getPropertyValue("--eiva-only"), REVIEW: styles.getPropertyValue("--review"), RECORDER_INVALID: styles.getPropertyValue("--invalid"), NO_SHOT: styles.getPropertyValue("--review") };
+    context.clearRect(0, 0, timelineTrackWidth, 60);
+    context.strokeStyle = styles.getPropertyValue("--border"); context.globalAlpha = 1; context.lineWidth = 1; context.beginPath(); context.moveTo(0, 30.5); context.lineTo(timelineTrackWidth, 30.5); context.stroke();
+    records.forEach((record, index) => {
+      const x = ((timelinePositionForRecord(record) - 1) / Math.max(1, timelineTotal - 1)) * (timelineTrackWidth - 8);
+      const selected = selectedIndex === index;
+      context.globalAlpha = record.status === "MATCHED" ? .55 : 1;
+      context.fillStyle = colors[record.status] || colors.MATCHED;
+      context.fillRect(x - (selected ? 3 : 1.5), selected ? 8 : (record.status === "MATCHED" ? 18 : 14), selected ? 6 : (record.status === "MATCHED" ? 2 : 5), selected ? 44 : (record.status === "MATCHED" ? 25 : 31));
+      if (selected) { context.strokeStyle = styles.getPropertyValue("--text"); context.lineWidth = 1; context.strokeRect(x - 4, 7, 8, 46); }
+    });
+    context.globalAlpha = 1;
+    markTiming("timeline-render-complete");
+  }, [records, selectedIndex, timelineTotal, timelineTrackWidth, theme]);
 
   const columns = useMemo<ColumnDef<EngineRecord>[]>(() => visibleColumns.map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
     return { id: key, header: spec.label, accessorFn: (record) => getCellValue(record, key), cell: (info) => info.getValue() as string };
   }), [allColumns, visibleColumns]);
   const table = useReactTable({ data: records, columns, getCoreRowModel: getCoreRowModel() });
-  const timelineTrackWidth = Math.max(1400, records.length * 5);
-  const timelineTotal = analysis?.summary.eiva_rows || records.length;
+  const tableRows = table.getRowModel().rows;
+  const rowVirtualizer = useVirtualizer({
+    count: tableRows.length,
+    getScrollElement: () => tableViewportRef.current,
+    estimateSize: () => 31,
+    overscan: 8,
+    getItemKey: (index) => tableRows[index]?.id || index,
+  });
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  useLayoutEffect(() => { if (analysis) markTiming("table-render-complete"); }, [analysis, virtualRows.length, visibleColumns]);
   const visibleStart = timelineTotal ? Math.min(timelineTotal, Math.floor((timelineLeft / timelineTrackWidth) * timelineTotal) + 1) : 0;
   const visibleCount = timelineRef.current ? Math.ceil((timelineRef.current.clientWidth / timelineTrackWidth) * timelineTotal) : 0;
   const visibleEnd = timelineTotal ? Math.min(timelineTotal, visibleStart + Math.max(1, visibleCount) - 1) : 0;
@@ -200,7 +284,7 @@ export default function App() {
   return <div className="app-shell">
     <header className="app-header">
       <div><h1>ShotLogFixer</h1><p>Seismic acquisition QC</p></div>
-      <div className="header-actions"><StatusMark lifecycle={lifecycle} /><label className="theme-control">Theme <select aria-label="Theme" value={themePreference} onChange={(event) => setThemePreference(event.target.value as ThemePreference)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label></div>
+      <div className="header-actions"><StatusMark lifecycle={lifecycle} /><ThemePicker value={themePreference} onChange={setThemePreference} /></div>
     </header>
 
     <main>
@@ -233,15 +317,14 @@ export default function App() {
       <section className="timeline-section" aria-label="Acquisition timeline">
         <div className="section-heading"><h2>Acquisition timeline</h2><span>Positions {analysis ? `${visibleStart}–${visibleEnd} of ${timelineTotal}` : "—"}</span></div>
         <div className="timeline-viewport" ref={timelineRef} onScroll={handleTimelineScroll} onWheel={handleWheel} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
-          <div className="timeline-track" style={{ width: timelineTrackWidth }}>
-            {records.map((record, index) => { const position = timelinePositionForRecord(record); const left = ((position - 1) / Math.max(1, timelineTotal - 1)) * (timelineTrackWidth - 8); const tooltip = record.status === "MATCHED" ? `EIVA ${record.eiva_ffid || "—"} → Recorder ${record.recorder_ffid || "—"}\nDistance ${record.distance_m?.toFixed(3) || "—"} m\nStatus ${record.status}` : `EIVA ${record.eiva_ffid || "—"}\nStatus ${record.status}\nPosition ${position} / ${timelineTotal}`; return <button key={record.id} className={`timeline-marker marker-${record.status.toLowerCase()} ${selectedIndex === index ? "selected" : ""}`} style={{ left }} onClick={() => selectRecord(index)} aria-label={`${record.status} at position ${position}`} title={tooltip} data-tooltip={tooltip} />; })}
-          </div>
+          <canvas ref={timelineCanvasRef} className="timeline-canvas" width={timelineTrackWidth} height={60} style={{ width: timelineTrackWidth, height: 60 }} onClick={handleTimelineClick} onMouseMove={handleTimelineMove} onMouseLeave={handleTimelineLeave} aria-label="Acquisition timeline" />
+          {timelineTooltip && <div className="timeline-tooltip" style={{ left: timelineTooltip.x, top: timelineTooltip.y }}>{timelineTooltip.text}</div>}
         </div>
       </section>
 
       <section className="table-section" aria-label="QC detail">
         <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap"><button className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <div className="columns-popover"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div><button className="button primary compact-button" onClick={() => setColumnsOpen(false)}>Apply</button></div>}</div></div>
-        <div className="table-viewport"><table><thead>{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th key={header.id}>{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead><tbody>{table.getRowModel().rows.map((row) => <tr key={row.id} ref={(element) => { tableRowRefs.current[row.index] = element; }} data-selected={selectedIndex === row.index} data-status={row.original.status} onClick={() => selectRecord(row.index)}>{row.getVisibleCells().map((cell) => <td key={cell.id} className={cell.column.id === "status" ? `status-cell status-${row.original.status.toLowerCase()}` : undefined}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}</tbody></table>{!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}</div>
+        <div className="table-viewport" ref={tableViewportRef}><table><thead>{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th key={header.id}>{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead><tbody style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>{virtualRows.map((virtualRow) => { const row = tableRows[virtualRow.index]; return <tr key={row.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="virtual-row" style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }} data-selected={selectedIndex === row.index} data-status={row.original.status} onClick={() => selectRecord(row.index)}>{row.getVisibleCells().map((cell) => <td key={cell.id} className={cell.column.id === "status" ? `status-cell status-${row.original.status.toLowerCase()}` : undefined}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}</tbody></table>{!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}</div>
       </section>
     </main>
     <footer className="app-footer"><span>{analysis ? `${records.length.toLocaleString()} result rows` : "Ready for an offline analysis"}</span><div className="footer-actions"><button className="button secondary compact-button" onClick={exportQc} disabled={!analysis}><Icon name="download" />Export QC CSV</button><button className="button secondary compact-button" onClick={saveFixedEiva} disabled={!correctionReady}>Save Fixed EIVA</button><button className="button primary compact-button" onClick={saveFixedPair} disabled={!correctionReady}>Save Fixed Pair</button></div></footer>
