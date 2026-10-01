@@ -1,5 +1,5 @@
 export const diagnosticOptions = window.shotlogfixer?.diagnostics;
-export const diagnosticsEnabled = import.meta.env.DEV || Boolean(diagnosticOptions);
+export const diagnosticsEnabled = Boolean(diagnosticOptions);
 const counters: Record<string, number> = {};
 const snapshot = { ticks: 0, frames: 0, lastTick: 0, phase: "startup", counters };
 

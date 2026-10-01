@@ -4,7 +4,7 @@ Offline tkinter QC utility comparing an EIVA navigation CSV/TXT log with a white
 
 Run the GUI with `python app.py`. Run tests with `pytest`. Build on Windows with `pyinstaller --onefile --windowed app.py`.
 
-The GUI provides a horizontally scrollable, acquisition-order timeline with clickable problem markers. EIVA-only, recorder-invalid, and review counters support wrapped previous/next navigation. The default table shows FFIDs, coordinate pairs, distance, and status; optional raw EIVA columns and diagnostics can be enabled with **Columns**. CSV export always retains the complete audit fields regardless of table visibility.
+The GUI provides a horizontally scrollable, acquisition-order timeline with clickable problem markers. EIVA-only, NO_SHOT, recorder-invalid, review, and FFID-jump events share synchronized wrapped navigation. The default table shows FFIDs, coordinate pairs, distance, and status; optional raw EIVA columns and diagnostics can be enabled with **Columns**. QC TXT export always retains the complete audit fields regardless of table visibility.
 
 ## Electron/React desktop UI
 
@@ -25,7 +25,7 @@ npm run electron:smoke
 
 The renderer keeps the compact Phase 2 layout and canvas acquisition timeline. The table uses a stable native render path: the former TanStack table/virtualizer combination was isolated as the source of an unbounded Windows Chromium render loop (it reproduced with zero rows and after both theme and analysis updates), so it is no longer on the release path. Development-only diagnostics record Electron renderer lifecycle events, a renderer heartbeat, React render counters, theme phases, analysis IPC/Python/JSON timings, response size and raw-field contribution, and post-commit animation frames. Production builds do not emit those diagnostics. Theme selection remains a controlled menu backed by CSS variables and persisted preference.
 
-To run the diagnostic smoke test, use `npm run electron:smoke`. It clicks the real ThemePicker and Columns controls, waits for two animation frames after each theme change, and verifies heartbeat progress. An analysis smoke pass can be added by setting `SHOTLOGFIXER_SMOKE_EIVA` and `SHOTLOGFIXER_SMOKE_RECORDER` to deterministic fixture paths before running the command; it drives the real Analyse button and checks the post-commit UI. For controlled isolation runs, pass `--isolation=header-only`, `--isolation=no-table`, `--isolation=no-timeline`, or `--css=minimal` after the Electron entry point. Diagnostics are enabled only for development or an explicit diagnostic flag.
+To run the diagnostic smoke test, use `npm run electron:smoke`. It clicks the real ThemePicker and Columns controls, waits for two animation frames after each theme change, and verifies heartbeat progress. An analysis smoke pass can be added by setting `SHOTLOGFIXER_SMOKE_EIVA` and `SHOTLOGFIXER_SMOKE_RECORDER` to deterministic fixture paths before running the command; it drives the real Analyse button and checks the post-commit UI. For controlled isolation runs, pass `--isolation=header-only`, `--isolation=no-table`, `--isolation=no-timeline`, or `--css=minimal` after the Electron entry point. Diagnostics are opt-in with `--renderer-diagnostics`; normal `electron .` runs stay quiet and packaged builds do not enable them.
 
 The adapter can also be called directly with JSON on stdin:
 

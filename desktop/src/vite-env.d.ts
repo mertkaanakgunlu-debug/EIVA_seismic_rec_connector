@@ -10,7 +10,7 @@ declare global {
       selectEivaFile: () => Promise<string | null>;
       selectRecorderFile: () => Promise<string | null>;
       analyseFiles: (eivaPath: string, recorderPath: string) => Promise<AnalysisResponse>;
-      selectQcExportPath: () => Promise<string | null>;
+      selectQcExportPath: (eivaPath: string) => Promise<string | null>;
       exportQc: (eivaPath: string, recorderPath: string, outputPath: string) => Promise<ExportResponse>;
       selectFixedEivaPath: (eivaPath: string) => Promise<string | null>;
       selectFixedPairPath: (eivaPath: string, recorderPath: string) => Promise<{ eivaPath: string; recorderPath: string } | null>;

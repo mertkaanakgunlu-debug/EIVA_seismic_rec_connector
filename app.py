@@ -7,7 +7,7 @@ from shotlogfixer.parsers import parse_eiva, parse_recorder
 from shotlogfixer.qc import (anomaly_event_count, anomaly_frequency_per_1000,
                              ffid_discontinuities, next_cycle,
                              problem_result_indices)
-from shotlogfixer.report import export_csv
+from shotlogfixer.report import export_txt
 from shotlogfixer.theme import get_theme
 
 
@@ -79,7 +79,7 @@ class App(tk.Tk):
         self.tree.grid(row=0, column=0, sticky="nsew"); self.tree_scroll_y.grid(row=0, column=1, sticky="ns"); self.tree_scroll_x.grid(row=1, column=0, sticky="ew")
         table_frame.rowconfigure(0, weight=1); table_frame.columnconfigure(0, weight=1); self.tree.bind("<<TreeviewSelect>>", self._table_selected)
         bottom = ttk.Frame(self, style="App.TFrame", padding=(18, 0, 18, 14)); bottom.pack(fill="x")
-        ttk.Button(bottom, text="Export QC CSV", style="Secondary.TButton", command=self.export).pack(side="right")
+        ttk.Button(bottom, text="Export QC TXT", style="Secondary.TButton", command=self.export).pack(side="right")
 
     def _make_counter_row(self, label, status=None, informational=False):
         card = ttk.Frame(self.card_frame, style="Card.TFrame", padding=(14, 10)); card.pack(side="left", fill="x", expand=True, padx=(0, 8))
@@ -231,12 +231,12 @@ class App(tk.Tk):
         for status in ("EIVA_ONLY", "RECORDER_INVALID", "REVIEW"): getattr(self, f"{status.lower()}_value").config(text="—"); getattr(self, f"{status.lower()}_position").config(text="")
         self.metrics.config(text="Flagged records: —   Anomaly events: —   Anomaly frequency: —")
     def export(self):
-        if not self.results: self._show_error("Export QC CSV", "Please analyse a valid EIVA and recorder file pair first."); return
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not self.results: self._show_error("Export QC TXT", "Please analyse a valid EIVA and recorder file pair first."); return
+        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text", "*.txt")])
         if not path: return
-        try: export_csv(path, self.results)
-        except PermissionError as exc: self._show_error("Export QC CSV", "Unable to write the QC CSV file.", str(exc))
-        except OSError as exc: self._show_error("Export QC CSV", "Unable to write the QC CSV file.", str(exc))
+        try: export_txt(path, self.results)
+        except PermissionError as exc: self._show_error("Export QC TXT", "Unable to write the QC TXT file.", str(exc))
+        except OSError as exc: self._show_error("Export QC TXT", "Unable to write the QC TXT file.", str(exc))
 
 
 if __name__ == "__main__": App().mainloop()

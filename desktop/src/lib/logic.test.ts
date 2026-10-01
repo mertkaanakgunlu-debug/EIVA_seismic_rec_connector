@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextCycle, resolveThemePreference, summaryForDisplay, timelinePositionForRecord, timelineRecordIndexAtX } from "./logic";
+import { columnAlignment, ffidJumpTargets, getCellValue, nextCycle, resolveThemePreference, summaryForDisplay, timelineLogicalX, timelinePositionForRecord, timelineRecordIndexAtX } from "./logic";
 
 describe("navigation helpers", () => {
   it("wraps problem navigation in both directions", () => {
@@ -23,6 +23,18 @@ describe("navigation helpers", () => {
     const records = [{ acquisition_position: 1 }, { acquisition_position: 50 }, { acquisition_position: 100 }] as never[];
     expect(timelineRecordIndexAtX(records, 0, 1000, 100)).toBe(0);
     expect(timelineRecordIndexAtX(records, 990, 1000, 100)).toBe(2);
+  });
+
+  it("uses one logical coordinate after horizontal scrolling", () => {
+    expect(timelineLogicalX(140, 100, 300)).toBe(340);
+  });
+
+  it("resolves status display and FFID jump targets", () => {
+    const records = [{ eiva_ffid: "543", status: "EIVA_ONLY", eiva_values: {} }, { eiva_ffid: "553", status: "MATCHED", eiva_values: {} }] as never[];
+    expect(getCellValue(records[0], "status")).toBe("EIVA_ONLY");
+    expect(ffidJumpTargets(records, [{ from: "543", to: "553" }])).toEqual([1]);
+    expect(columnAlignment("distance")).toBe("center");
+    expect(columnAlignment("diagnostic")).toBe("left");
   });
 
   it("keeps total issues as issue-region count", () => {

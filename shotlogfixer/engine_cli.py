@@ -16,7 +16,7 @@ from .correction import (CorrectionNotValidatedError, prepare_correction, save_f
 from .matcher import match_records
 from .parsers import parse_eiva, parse_recorder
 from .qc import ffid_discontinuities, total_issue_count
-from .report import export_csv
+from .report import export_csv, export_txt
 
 
 def _error(code: str, message: str, detail: str | None = None) -> dict[str, Any]:
@@ -180,15 +180,20 @@ def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any) -> dict[str,
     if isinstance(recorder, dict):
         return recorder
     if not isinstance(output_path, str) or not output_path.strip():
-        return _error("MISSING_EXPORT_PATH", "Choose a destination for the QC CSV.")
+        return _error("MISSING_EXPORT_PATH", "Choose a destination for the QC TXT.")
     output = Path(output_path).expanduser()
     try:
         results = match_records(parse_eiva(eiva), parse_recorder(recorder))
-        export_csv(output, results)
+        # `.txt` is the product format. Keep `.csv` as a legacy direct-API
+        # compatibility path for existing integrations, never selected by the UI.
+        if output.suffix.lower() == ".csv":
+            export_csv(output, results)
+        else:
+            export_txt(output, results)
     except PermissionError as exc:
-        return _error("EXPORT_PERMISSION_DENIED", "Unable to write the QC CSV file.", str(exc))
+        return _error("EXPORT_PERMISSION_DENIED", "Unable to write the QC TXT file.", str(exc))
     except (OSError, ValueError) as exc:
-        return _error("EXPORT_FAILED", "Unable to export the QC CSV file.", str(exc))
+        return _error("EXPORT_FAILED", "Unable to export the QC TXT file.", str(exc))
     return {"ok": True, "path": str(output), "rows": len(results)}
 
 

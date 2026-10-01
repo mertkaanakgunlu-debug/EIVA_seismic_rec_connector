@@ -1,15 +1,15 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from "react";
-import { basename, formatCoordinate, nextCycle, resolveThemePreference, statusIndices, timelinePositionForRecord, timelineRecordIndexAtX } from "./lib/logic";
-import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, Status } from "./lib/types";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { basename, columnAlignment, ffidJumpTargets, getCellValue, nextCycle, resolveThemePreference, statusIndices, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX } from "./lib/logic";
+import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse } from "./lib/types";
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
-const IS_DEV = import.meta.env.DEV;
+const EMPTY_RECORDS: EngineRecord[] = [];
 
 function markTiming(name: string, start?: string) {
-  if (!IS_DEV || typeof performance === "undefined") return;
+  if (!diagnosticsEnabled || typeof performance === "undefined") return;
   performance.mark(name);
   if (start) {
     try { performance.measure(name, start, name); } catch { /* The mark may be the first event in a fresh renderer. */ }
@@ -59,20 +59,6 @@ function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (v
   </div>;
 }
 
-function getCellValue(record: EngineRecord, key: string): string {
-  switch (key) {
-    case "eiva_ffid": return record.eiva_ffid || "";
-    case "recorder_ffid": return record.recorder_ffid || "";
-    case "eiva_coord": return formatCoordinate(record.eiva_easting, record.eiva_northing);
-    case "recorder_coord": return record.status === "NO_SHOT" ? "No shot recorded" : formatCoordinate(record.recorder_x, record.recorder_y);
-    case "distance": return record.distance_m === null ? "" : record.distance_m.toFixed(3);
-    case "recorder_x": return record.recorder_x === null ? "" : record.recorder_x.toFixed(2);
-    case "recorder_y": return record.recorder_y === null ? "" : record.recorder_y.toFixed(2);
-    case "diagnostic": return record.diagnostic;
-    default: return record.eiva_values[key.slice("eiva_raw:".length)] || "";
-  }
-}
-
 function errorMessage(response: AnalysisResponse | ExportResponse): string {
   const error = "error" in response ? response.error : undefined;
   if (error?.message) return error.detail ? `${error.message} ${error.detail}` : error.message;
@@ -98,10 +84,12 @@ export default function App() {
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelineCanvasRef = useRef<HTMLCanvasElement>(null);
   const tableViewportRef = useRef<HTMLDivElement>(null);
+  const columnsWrapRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef({ active: false, moved: false, x: 0, scrollLeft: 0 });
 
   const theme = resolveThemePreference(themePreference, systemDark);
   useEffect(() => {
+    if (!diagnosticsEnabled) return;
     document.documentElement.dataset.diagnosticsCss = diagnosticOptions?.css || "full";
     return () => { delete document.documentElement.dataset.diagnosticsCss; };
   }, []);
@@ -122,9 +110,17 @@ export default function App() {
     return () => media.removeEventListener?.("change", onChange);
   }, []);
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(""), 3600); return () => window.clearTimeout(timer); }, [toast]);
+  useEffect(() => {
+    if (!columnsOpen) return;
+    const closeOutside = (event: globalThis.MouseEvent) => {
+      if (columnsWrapRef.current && !columnsWrapRef.current.contains(event.target as Node)) setColumnsOpen(false);
+    };
+    document.addEventListener("mousedown", closeOutside);
+    return () => document.removeEventListener("mousedown", closeOutside);
+  }, [columnsOpen]);
   useEffect(() => { if (analysis) markTiming("analysis-state-assigned"); }, [analysis]);
   useEffect(() => {
-    if (!analysis) return;
+    if (!analysis || !diagnosticsEnabled) return;
     diagnosticPhase(`analysis-react-commit:${analysis.records.length}-rows`);
     requestAnimationFrame(() => requestAnimationFrame(() => diagnosticPhase("analysis-two-frames")));
   }, [analysis]);
@@ -134,32 +130,64 @@ export default function App() {
     return () => { delete window.shotlogfixerTest; };
   }, []);
 
-  const records = analysis?.records || [];
+  const records = analysis?.records || EMPTY_RECORDS;
   const problemGroups = useMemo(() => ({
     EIVA_ONLY: statusIndices(records, "EIVA_ONLY"),
+    NO_SHOT: statusIndices(records, "NO_SHOT"),
     RECORDER_INVALID: statusIndices(records, "RECORDER_INVALID"),
     REVIEW: statusIndices(records, "REVIEW"),
   }), [records]);
-  const [navCurrent, setNavCurrent] = useState<Record<string, number | null>>({ EIVA_ONLY: null, RECORDER_INVALID: null, REVIEW: null });
+  const [navCurrent, setNavCurrent] = useState<Record<string, number | null>>({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null });
+  const jumpTargets = useMemo(() => ffidJumpTargets(records, analysis?.ffid_jumps || []), [analysis, records]);
+  const [jumpCurrent, setJumpCurrent] = useState<number | null>(null);
   const allColumns = useMemo(() => [...BASE_COLUMNS, ...(analysis?.eiva_headers || []).map((header) => ({ key: `eiva_raw:${header}`, label: `EIVA ${header}` }))], [analysis]);
 
-  const selectRecord = (index: number) => {
+  const focusRecord = (index: number) => {
     if (!records[index]) return;
     setSelectedIndex(index);
-    rowVirtualizer.scrollToIndex(index, { align: "center", behavior: "smooth" });
+    const status = records[index].status;
+    if (status !== "MATCHED") setNavCurrent((current) => ({ ...current, [status]: index }));
+    const jump = jumpTargets.indexOf(index);
+    if (jump >= 0) setJumpCurrent(jump);
+    const viewport = tableViewportRef.current;
+    const row = viewport?.querySelector<HTMLTableRowElement>(`tr[data-index="${index}"]`);
+    if (viewport && row) {
+      const rowTop = viewport.scrollTop + row.getBoundingClientRect().top - viewport.getBoundingClientRect().top - viewport.clientTop;
+      viewport.scrollTo({ top: Math.max(0, rowTop - (viewport.clientHeight - row.clientHeight) / 2), behavior: "auto" });
+    }
     const timeline = timelineRef.current;
     if (timeline) {
       const trackWidth = Math.max(1400, records.length * 5);
-      const x = ((timelinePositionForRecord(records[index]) - 1) / Math.max(1, (analysis?.summary.eiva_rows || records.length) - 1)) * trackWidth;
-      timeline.scrollTo({ left: Math.max(0, x - timeline.clientWidth / 2), behavior: "smooth" });
+      const x = timelineMarkerX(records[index], trackWidth, analysis?.summary.eiva_rows || records.length);
+      timeline.scrollTo({ left: Math.max(0, x - timeline.clientWidth / 2), behavior: "auto" });
     }
   };
 
-  const navigate = (status: "EIVA_ONLY" | "RECORDER_INVALID" | "REVIEW", step: 1 | -1) => {
+  const navigate = (status: "EIVA_ONLY" | "NO_SHOT" | "RECORDER_INVALID" | "REVIEW", step: 1 | -1) => {
     const next = nextCycle(problemGroups[status], navCurrent[status], step);
     if (next === null) return;
     setNavCurrent((current) => ({ ...current, [status]: next }));
-    selectRecord(next);
+    focusRecord(next);
+  };
+
+  const focusIssue = (status: "EIVA_ONLY" | "NO_SHOT" | "RECORDER_INVALID" | "REVIEW") => {
+    const current = navCurrent[status];
+    const target = current !== null && problemGroups[status].includes(current) ? current : nextCycle(problemGroups[status], null, 1);
+    if (target === null) return;
+    setNavCurrent((state) => ({ ...state, [status]: target }));
+    focusRecord(target);
+  };
+
+  const navigateJump = (step: 1 | -1) => {
+    const next = nextCycle(jumpTargets.flatMap((target, index) => target === null ? [] : [index]), jumpCurrent, step);
+    if (next === null || jumpTargets[next] === null) return;
+    setJumpCurrent(next);
+    focusRecord(jumpTargets[next]);
+  };
+
+  const focusJump = () => {
+    if (jumpCurrent !== null && jumpTargets[jumpCurrent] !== null) focusRecord(jumpTargets[jumpCurrent]);
+    else navigateJump(1);
   };
 
   const chooseFile = async (kind: "eiva" | "recorder") => {
@@ -182,21 +210,21 @@ export default function App() {
       const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath);
       diagnosticPhase("analyse-ipc-promise-resolved");
       markTiming("python-response-received", "analyse-request-start");
-      diagnosticPhase(`analyse-response-known:${JSON.stringify(response).length}-bytes`);
+      if (diagnosticsEnabled) diagnosticPhase(`analyse-response-known:${JSON.stringify(response).length}-bytes`);
       if (!response.ok) { setError(errorMessage(response)); setLifecycle("failed"); return; }
-      setAnalysis(response); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, RECORDER_INVALID: null, REVIEW: null }); setLifecycle("done");
+      setAnalysis(response); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null }); setJumpCurrent(null); setLifecycle("done");
     } catch { setError("The Python engine could not be reached."); setLifecycle("failed"); }
   };
 
   const exportQc = async () => {
-    if (!analysis) { setError("Analyse a valid file pair before exporting QC CSV."); return; }
+    if (!analysis) { setError("Analyse a valid file pair before exporting QC."); return; }
     try {
-      const outputPath = await window.shotlogfixer.selectQcExportPath();
+      const outputPath = await window.shotlogfixer.selectQcExportPath(eivaPath);
       if (!outputPath) return;
       const response = await window.shotlogfixer.exportQc(eivaPath, recorderPath, outputPath);
       if (!response.ok) { setError(errorMessage(response)); return; }
-      setToast("QC CSV exported successfully");
-    } catch { setError("The QC CSV could not be exported."); }
+      setToast("QC TXT exported successfully");
+    } catch { setError("The QC TXT could not be exported."); }
   };
 
   const correctionReady = Boolean(analysis?.correction.safe && analysis.validation.passed);
@@ -223,42 +251,51 @@ export default function App() {
   };
 
   const handleTimelineScroll = () => setTimelineLeft(timelineRef.current?.scrollLeft || 0);
-  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
+  useEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) return;
-    event.preventDefault();
-    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-    timeline.scrollLeft += delta;
-  };
+    const wheel = (event: globalThis.WheelEvent) => {
+      event.preventDefault();
+      timeline.scrollLeft += Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    };
+    // React's delegated wheel listener is passive in Chromium. Keep wheel panning
+    // local so it can suppress vertical page scrolling reliably.
+    timeline.addEventListener("wheel", wheel, { passive: false });
+    return () => timeline.removeEventListener("wheel", wheel);
+  }, []);
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     const timeline = timelineRef.current;
     if (!timeline) return;
     dragRef.current = { active: true, moved: false, x: event.clientX, scrollLeft: timeline.scrollLeft };
-    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (!dragRef.current.active || !timelineRef.current) return;
     const delta = event.clientX - dragRef.current.x;
-    if (Math.abs(delta) > 3) dragRef.current.moved = true;
+    if (Math.abs(delta) > 3 && !dragRef.current.moved) {
+      dragRef.current.moved = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setTimelineTooltip(null);
+    }
     timelineRef.current.scrollLeft = dragRef.current.scrollLeft - delta;
   };
-  const handlePointerUp = () => { dragRef.current.active = false; };
-  const handleTimelineClick = (event: MouseEvent<HTMLCanvasElement>) => {
-    if (dragRef.current.moved || !timelineRef.current) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = event.clientX - rect.left + timelineRef.current.scrollLeft;
+  const handlePointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    dragRef.current.active = false;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const handleTimelineClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (dragRef.current.moved) { dragRef.current.moved = false; return; }
+    if (!timelineRef.current) return;
+    const x = timelineLogicalX(event.clientX, timelineRef.current.getBoundingClientRect().left + timelineRef.current.clientLeft, timelineRef.current.scrollLeft);
     const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
-    if (index !== null) selectRecord(index);
+    if (index !== null) focusRecord(index);
   };
   const handleTimelineMove = (event: MouseEvent<HTMLCanvasElement>) => {
     if (!timelineRef.current || !records.length) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = event.clientX - rect.left + timelineRef.current.scrollLeft;
+    if (dragRef.current.active && dragRef.current.moved) return;
+    const x = timelineLogicalX(event.clientX, timelineRef.current.getBoundingClientRect().left + timelineRef.current.clientLeft, timelineRef.current.scrollLeft);
     const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
-    if (index === null) return;
+    if (index === null) { setTimelineTooltip(null); return; }
     const record = records[index];
-    const markerX = ((timelinePositionForRecord(record) - 1) / Math.max(1, timelineTotal - 1)) * (timelineTrackWidth - 8);
-    if (Math.abs(markerX - x) > 9) { setTimelineTooltip(null); return; }
     setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: record.status === "MATCHED" ? `EIVA ${record.eiva_ffid || "—"} → Recorder ${record.recorder_ffid || "—"}\n${record.distance_m?.toFixed(3) || "—"} m` : `EIVA ${record.eiva_ffid || "—"}\n${record.status}` });
   };
   const handleTimelineLeave = () => setTimelineTooltip(null);
@@ -277,7 +314,7 @@ export default function App() {
     context.clearRect(0, 0, timelineTrackWidth, 60);
     context.strokeStyle = styles.getPropertyValue("--border"); context.globalAlpha = 1; context.lineWidth = 1; context.beginPath(); context.moveTo(0, 30.5); context.lineTo(timelineTrackWidth, 30.5); context.stroke();
     records.forEach((record, index) => {
-      const x = ((timelinePositionForRecord(record) - 1) / Math.max(1, timelineTotal - 1)) * (timelineTrackWidth - 8);
+      const x = timelineMarkerX(record, timelineTrackWidth, timelineTotal);
       const selected = selectedIndex === index;
       context.globalAlpha = record.status === "MATCHED" ? .55 : 1;
       context.fillStyle = colors[record.status] || colors.MATCHED;
@@ -291,21 +328,11 @@ export default function App() {
 
   const columns = useMemo(() => visibleColumns.map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
-    return { id: key, header: spec.label };
+    const width = key === "diagnostic" || key.startsWith("eiva_raw:") ? 220 : key.endsWith("coord") ? 220 : key === "status" ? 160 : 130;
+    return { id: key, header: spec.label, alignment: columnAlignment(key), width };
   }), [allColumns, visibleColumns]);
   const tableRecords = ["no-table", "no-visualizations", "header-only"].includes(isolation) ? [] : records;
-  const tableRows = tableRecords.map((original, index) => ({ id: String(index), index, original }));
-  // The previous TanStack virtualizer continuously invalidated its ResizeObserver on
-  // Windows Chromium, producing an unbounded App render loop even with zero rows.
-  // 2,816 rows are small enough for a stable native table and keep correctness ahead
-  // of an optional rendering optimization.
-  const virtualRows = tableRows.map((_row, index) => ({ index, start: index * 31, size: 31 }));
-  const rowVirtualizer = {
-    getTotalSize: () => tableRows.length * 31,
-    scrollToIndex: (index: number, _options?: unknown) => { if (tableViewportRef.current) tableViewportRef.current.scrollTop = index * 31; },
-    measureElement: undefined,
-  };
-  useLayoutEffect(() => { if (analysis) markTiming("table-render-complete"); }, [analysis, virtualRows.length, visibleColumns]);
+  useLayoutEffect(() => { if (analysis) markTiming("table-render-complete"); }, [analysis, visibleColumns]);
   const visibleStart = timelineTotal ? Math.min(timelineTotal, Math.floor((timelineLeft / timelineTrackWidth) * timelineTotal) + 1) : 0;
   const visibleCount = timelineRef.current ? Math.ceil((timelineRef.current.clientWidth / timelineTrackWidth) * timelineTotal) : 0;
   const visibleEnd = timelineTotal ? Math.min(timelineTotal, visibleStart + Math.max(1, visibleCount) - 1) : 0;
@@ -320,7 +347,14 @@ export default function App() {
       <section className="input-section" aria-label="Input files">
         <div className="file-row"><label htmlFor="eiva-path">EIVA Log</label><input id="eiva-path" value={eivaPath ? basename(eivaPath) : "No file selected"} readOnly title={eivaPath} className={!eivaPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("eiva")}>Browse</button></div>
         <div className="file-row"><label htmlFor="recorder-path">Recorder Log</label><input id="recorder-path" value={recorderPath ? basename(recorderPath) : "No file selected"} readOnly title={recorderPath} className={!recorderPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("recorder")}>Browse</button></div>
-        <button className="button primary analyse-button" onClick={analyse} disabled={lifecycle === "running"}>{lifecycle === "running" ? "ANALYSING" : "ANALYSE"}</button>
+        <div className="input-actions">
+          <button className="button primary analyse-button" onClick={analyse} disabled={lifecycle === "running"}>{lifecycle === "running" ? "ANALYSING" : "ANALYSE"}</button>
+          <div className="output-actions" aria-label="Output actions">
+            <button className="button secondary compact-button" onClick={exportQc} disabled={!analysis}><Icon name="download" />Export QC</button>
+            <button className="button secondary compact-button" onClick={saveFixedEiva} disabled={!correctionReady}>Save Fixed EIVA</button>
+            <button className="button primary compact-button" onClick={saveFixedPair} disabled={!correctionReady}>Save Fixed Pair</button>
+          </div>
+        </div>
       </section>
 
       {error && <div className="error-line" role="alert"><strong>{lifecycle === "failed" ? "Analysis issue" : "Export issue"}</strong><span>{error}</span></div>}
@@ -328,12 +362,12 @@ export default function App() {
       <section className="summary-section" aria-label="Analysis summary">
         <div className="summary-line">
           <span className="summary-item">Matched <b>{analysis ? analysis.summary.matched : "—"}</b></span>
-          <Counter label="EIVA Only" status="EIVA_ONLY" count={analysis?.summary.eiva_only} current={navCurrent.EIVA_ONLY} ordinal={problemGroups.EIVA_ONLY.indexOf(navCurrent.EIVA_ONLY ?? -1) + 1} total={problemGroups.EIVA_ONLY.length} onNavigate={navigate} />
-          <span className="summary-item summary-no_shot">NO_SHOT <b>{analysis ? analysis.summary.no_shot ?? 0 : "—"}</b></span>
-          <Counter label="Invalid" status="RECORDER_INVALID" count={analysis?.summary.recorder_invalid} current={navCurrent.RECORDER_INVALID} ordinal={problemGroups.RECORDER_INVALID.indexOf(navCurrent.RECORDER_INVALID ?? -1) + 1} total={problemGroups.RECORDER_INVALID.length} onNavigate={navigate} />
-          <Counter label="Review" status="REVIEW" count={analysis?.summary.review} current={navCurrent.REVIEW} ordinal={problemGroups.REVIEW.indexOf(navCurrent.REVIEW ?? -1) + 1} total={problemGroups.REVIEW.length} onNavigate={navigate} />
+          <Counter label="EIVA Only" status="EIVA_ONLY" count={analysis?.summary.eiva_only} current={navCurrent.EIVA_ONLY} ordinal={problemGroups.EIVA_ONLY.indexOf(navCurrent.EIVA_ONLY ?? -1) + 1} total={problemGroups.EIVA_ONLY.length} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label="NO_SHOT" status="NO_SHOT" count={analysis ? analysis.summary.no_shot ?? 0 : undefined} current={navCurrent.NO_SHOT} ordinal={problemGroups.NO_SHOT.indexOf(navCurrent.NO_SHOT ?? -1) + 1} total={problemGroups.NO_SHOT.length} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label="Invalid" status="RECORDER_INVALID" count={analysis?.summary.recorder_invalid} current={navCurrent.RECORDER_INVALID} ordinal={problemGroups.RECORDER_INVALID.indexOf(navCurrent.RECORDER_INVALID ?? -1) + 1} total={problemGroups.RECORDER_INVALID.length} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label="Review" status="REVIEW" count={analysis?.summary.review} current={navCurrent.REVIEW} ordinal={problemGroups.REVIEW.indexOf(navCurrent.REVIEW ?? -1) + 1} total={problemGroups.REVIEW.length} onNavigate={navigate} onFocus={focusIssue} />
         </div>
-        <div className="summary-detail"><span>Total issues: <b>{analysis ? analysis.summary.total_issues : "—"}</b></span><span>FFID jump: <b>{analysis?.ffid_jumps.length ? analysis.ffid_jumps.map((jump) => `${jump.from} → ${jump.to}`).join(", ") : analysis ? "none" : "—"}</b></span></div>
+        <div className="summary-detail"><span>Total issues: <b>{analysis ? analysis.summary.total_issues : "—"}</b></span><JumpNavigation jumps={analysis?.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} /></div>
         {analysis && <div className={`correction-line ${correctionReady ? "correction-ready" : "correction-blocked"}`}>
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
@@ -345,22 +379,55 @@ export default function App() {
 
       <section className="timeline-section" aria-label="Acquisition timeline">
         <div className="section-heading"><h2>Acquisition timeline</h2><span>Positions {analysis ? `${visibleStart}–${visibleEnd} of ${timelineTotal}` : "—"}</span></div>
-        <div className="timeline-viewport" ref={timelineRef} onScroll={handleTimelineScroll} onWheel={handleWheel} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
-          <canvas ref={timelineCanvasRef} className="timeline-canvas" width={timelineTrackWidth} height={60} style={{ width: timelineTrackWidth, height: 60 }} onClick={handleTimelineClick} onMouseMove={handleTimelineMove} onMouseLeave={handleTimelineLeave} aria-label="Acquisition timeline" />
-          {timelineTooltip && <div className="timeline-tooltip" style={{ left: timelineTooltip.x, top: timelineTooltip.y }}>{timelineTooltip.text}</div>}
+        <div className="timeline-viewport" ref={timelineRef} onClick={handleTimelineClick} onScroll={handleTimelineScroll} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
+          <canvas ref={timelineCanvasRef} className="timeline-canvas" width={timelineTrackWidth} height={60} style={{ width: timelineTrackWidth, height: 60 }} onMouseMove={handleTimelineMove} onMouseLeave={handleTimelineLeave} aria-label="Acquisition timeline" />
+          {timelineTooltip && <div className="timeline-tooltip" style={{ left: timelineTooltip.x + timelineLeft, top: timelineTooltip.y }}>{timelineTooltip.text}</div>}
         </div>
       </section>
 
       <section className="table-section" aria-label="QC detail">
-        <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap"><button className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <div className="columns-popover"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div><button className="button primary compact-button" onClick={() => setColumnsOpen(false)}>Apply</button></div>}</div></div>
-        <div className="table-viewport" ref={tableViewportRef}><table><thead><tr>{columns.map((column) => <th key={column.id}>{column.header}</th>)}</tr></thead><tbody style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>{virtualRows.map((virtualRow) => { const row = tableRows[virtualRow.index]; return <tr key={row.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="virtual-row" style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }} data-selected={selectedIndex === row.index} data-status={row.original.status} onClick={() => selectRecord(row.index)}>{columns.map((column) => <td key={column.id} className={column.id === "status" ? `status-cell status-${row.original.status.toLowerCase()}` : undefined}>{getCellValue(row.original, column.id)}</td>)}</tr>; })}</tbody></table>{!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}</div>
+        <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap" ref={columnsWrapRef}><button className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <div className="columns-popover"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div></div>}</div></div>
+        <div className="table-viewport" ref={tableViewportRef}>
+          <table style={{ minWidth: columns.reduce((sum, column) => sum + column.width, 0) }}>
+            <colgroup>{columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>
+            <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} style={{ textAlign: column.alignment }}>{column.header}</th>)}</tr></thead>
+            <tbody>{tableRecords.map((record, index) => <tr key={record.id} data-index={index} data-selected={selectedIndex === index} data-status={record.status} onClick={() => focusRecord(index)}>
+              {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "status" ? `status-cell status-${record.status.toLowerCase()}` : undefined}>{getCellValue(record, column.id)}</td>)}
+            </tr>)}</tbody>
+          </table>
+          {!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}
+        </div>
       </section>
     </main>
-    <footer className="app-footer"><span>{analysis ? `${records.length.toLocaleString()} result rows` : "Ready for an offline analysis"}</span><div className="footer-actions"><button className="button secondary compact-button" onClick={exportQc} disabled={!analysis}><Icon name="download" />Export QC CSV</button><button className="button secondary compact-button" onClick={saveFixedEiva} disabled={!correctionReady}>Save Fixed EIVA</button><button className="button primary compact-button" onClick={saveFixedPair} disabled={!correctionReady}>Save Fixed Pair</button></div></footer>
+    <footer className="app-footer"><span>{analysis ? `${records.length.toLocaleString()} result rows` : "Ready for an offline analysis"}</span></footer>
     {toast && <div className="toast" role="status">{toast}</div>}
   </div>;
 }
 
-function Counter({ label, status, count, current, ordinal, total, onNavigate }: { label: string; status: "EIVA_ONLY" | "RECORDER_INVALID" | "REVIEW"; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (status: "EIVA_ONLY" | "RECORDER_INVALID" | "REVIEW", step: 1 | -1) => void }) {
-  return <span className={`summary-item summary-${status.toLowerCase()}`}>{label} <b>{count ?? "—"}</b><span className="counter-nav"><button className="icon-button" onClick={() => onNavigate(status, -1)} disabled={!total} title={`Previous ${label.toLowerCase()}`}><Icon name="left" /></button><span>{current === null ? (total ? "1" : "0") : `${ordinal} / ${total}`}</span><button className="icon-button" onClick={() => onNavigate(status, 1)} disabled={!total} title={`Next ${label.toLowerCase()}`}><Icon name="right" /></button></span></span>;
+type NavigationStatus = "EIVA_ONLY" | "NO_SHOT" | "RECORDER_INVALID" | "REVIEW";
+
+function Counter({ label, status, count, current, ordinal, total, onNavigate, onFocus }: { label: string; status: NavigationStatus; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (status: NavigationStatus, step: 1 | -1) => void; onFocus: (status: NavigationStatus) => void }) {
+  return <EventNavigation className={`summary-${status.toLowerCase()}`} label={label} value={count ?? "—"} total={total} ordinal={current === null ? 1 : ordinal} onFocus={() => onFocus(status)} onNavigate={(step) => onNavigate(status, step)} />;
+}
+
+function JumpNavigation({ jumps, current, targets, onFocus, onNavigate }: { jumps: Array<{ from: string; to: string }>; current: number | null; targets: Array<number | null>; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
+  if (!jumps.length) return <span className="jump-navigation">FFID jump: <b>none</b></span>;
+  const jump = jumps[current ?? 0];
+  const transition = `${jump.from} → ${jump.to}`;
+  return <span className="jump-navigation">
+    <EventNavigation label={jumps.length === 1 ? "FFID jump:" : "FFID jumps:"} value={jumps.length === 1 ? transition : jumps.length} total={targets.some((target) => target !== null) ? jumps.length : 0} ordinal={(current ?? 0) + 1} onFocus={onFocus} onNavigate={onNavigate} />
+    {jumps.length > 1 && <b className="jump-transition">{transition}</b>}
+  </span>;
+}
+
+function EventNavigation({ className = "", label, value, total, ordinal, onFocus, onNavigate }: { className?: string; label: string; value: string | number; total: number; ordinal: number; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
+  const content = <>{label} <b>{value}</b></>;
+  return <span className={`summary-item ${className} ${total ? "" : "summary-inactive"}`}>
+    {total ? <button className="summary-trigger" onClick={onFocus}>{content}</button> : content}
+    {total > 1 && <span className="counter-nav">
+      <button className="icon-button" onClick={() => onNavigate(-1)} title={`Previous ${label.toLowerCase().replace(/:$/, "")}`}><Icon name="left" /></button>
+      <span>{ordinal} / {total}</span>
+      <button className="icon-button" onClick={() => onNavigate(1)} title={`Next ${label.toLowerCase().replace(/:$/, "")}`}><Icon name="right" /></button>
+    </span>}
+  </span>;
 }

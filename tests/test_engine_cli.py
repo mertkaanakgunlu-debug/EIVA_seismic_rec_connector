@@ -37,8 +37,8 @@ def test_structured_error_response(tmp_path):
 
 def test_qc_export_command_uses_python_report_logic(tmp_path):
     eiva, recorder = write_fixture(tmp_path)
-    output = tmp_path / "out.csv"
+    output = tmp_path / "out.txt"
     response = dispatch({"action": "export_qc", "eiva_path": str(eiva), "recorder_path": str(recorder), "output_path": str(output)})
     assert response["ok"] is True
-    assert output.read_text(encoding="utf-8-sig").splitlines()[0].startswith("eiva_ffid,")
+    assert output.read_text(encoding="utf-8").splitlines()[0].startswith("eiva_ffid\teiva_easting")
     assert len(output.read_text(encoding="utf-8-sig").splitlines()) == 3

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 const projectRoot = process.env.SHOTLOGFIXER_PROJECT_ROOT || path.resolve(__dirname, "../..");
-const diagnosticsEnabled = !app.isPackaged || process.argv.includes("--renderer-diagnostics");
+const diagnosticsEnabled = process.argv.includes("--renderer-diagnostics");
 let lastHeartbeat: Record<string, unknown> | null = null;
 let lastLoggedHeartbeat = "";
 
@@ -142,13 +142,14 @@ ipcMain.handle("analyse-files", (_event, payload: { eivaPath: string; recorderPa
   });
 });
 
-ipcMain.handle("select-qc-export-path", async () => {
+ipcMain.handle("select-qc-export-path", async (_event, payload: { eivaPath?: string }) => {
+  const defaultPath = payload?.eivaPath ? path.join(path.dirname(payload.eivaPath), `${path.parse(payload.eivaPath).name}_qc.txt`) : "shotlogfixer_qc.txt";
   const result = await dialog.showSaveDialog({
-    title: "Export QC CSV",
-    defaultPath: "shotlogfixer_qc.csv",
-    filters: [{ name: "CSV", extensions: ["csv"] }],
+    title: "Export QC TXT",
+    defaultPath,
+    filters: [{ name: "Text files", extensions: ["txt"] }],
   });
-  return result.canceled ? null : result.filePath || null;
+  return result.canceled ? null : result.filePath ? ensureTxtPath(result.filePath) : null;
 });
 
 ipcMain.handle("export-qc", (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string }) =>
@@ -159,15 +160,21 @@ function fixedStem(filePath: string) {
   return path.join(parsed.dir, `${parsed.name}_fixed.txt`);
 }
 
+function ensureTxtPath(filePath: string) {
+  const parsed = path.parse(filePath);
+  return path.join(parsed.dir, `${parsed.name}.txt`);
+}
+
 ipcMain.handle("select-fixed-eiva-path", async (_event, payload: { eivaPath: string }) => {
   const result = await dialog.showSaveDialog({ title: "Save Fixed EIVA", defaultPath: fixedStem(payload.eivaPath), filters: [{ name: "Text files", extensions: ["txt"] }] });
-  return result.canceled ? null : result.filePath || null;
+  return result.canceled ? null : result.filePath ? ensureTxtPath(result.filePath) : null;
 });
 
 ipcMain.handle("select-fixed-pair-path", async (_event, payload: { eivaPath: string; recorderPath: string }) => {
   const result = await dialog.showSaveDialog({ title: "Save Fixed Pair (choose EIVA file)", defaultPath: fixedStem(payload.eivaPath), filters: [{ name: "Text files", extensions: ["txt"] }] });
   if (result.canceled || !result.filePath) return null;
-  return { eivaPath: result.filePath, recorderPath: path.join(path.dirname(result.filePath), `${path.parse(payload.recorderPath).name}_fixed.txt`) };
+  const eivaPath = ensureTxtPath(result.filePath);
+  return { eivaPath, recorderPath: path.join(path.dirname(eivaPath), `${path.parse(payload.recorderPath).name}_fixed.txt`) };
 });
 
 async function confirmOverwrite(paths: string[]) {
@@ -241,7 +248,7 @@ async function runSmoke(window: BrowserWindow) {
         await window.webContents.executeJavaScript(`window.shotlogfixerTest?.setFiles(...${JSON.stringify([smokeEiva, smokeRecorder])})`);
         await waitForFrames(window);
         await window.webContents.executeJavaScript(`document.querySelector('.analyse-button')?.click()`);
-        const analysisDone = await window.webContents.executeJavaScript(`new Promise((resolve) => { const started = performance.now(); const poll = () => { const text = document.querySelector('.footer-actions')?.parentElement?.textContent || ''; if (/result rows/.test(text)) return resolve({ ok: true, text }); if (performance.now() - started > 20000) return resolve({ ok: false, text }); setTimeout(poll, 100); }; poll(); })`);
+        const analysisDone = await window.webContents.executeJavaScript(`new Promise((resolve) => { const started = performance.now(); const poll = () => { const text = document.querySelector('.app-footer')?.textContent || ''; if (/result rows/.test(text)) return resolve({ ok: true, text }); if (performance.now() - started > 20000) return resolve({ ok: false, text }); setTimeout(poll, 100); }; poll(); })`);
         await waitForFrames(window);
         const analysisHeartbeat = await window.webContents.executeJavaScript(`window.shotlogfixerHeartbeat?.() || null`);
         const analysisColumnsBefore = await window.webContents.executeJavaScript(`document.querySelector('.columns-wrap button')?.getAttribute('aria-expanded') || 'false'`);
