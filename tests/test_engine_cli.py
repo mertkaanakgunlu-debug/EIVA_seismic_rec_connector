@@ -45,3 +45,4 @@ def test_qc_export_command_uses_python_report_logic(tmp_path):
     assert len(exported.splitlines()) >= 3
     assert "# shot_interval_m=3.125" in exported
     assert "# match_tolerance_m=1.5625" in exported
+    assert "# recorder_gap_threshold_m=15.625" in exported

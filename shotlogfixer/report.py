@@ -24,6 +24,7 @@ def export_txt(path: str | Path, results: list[MatchResult], parameters=None, re
             f.write('\n# ShotLogFixer QC\n')
             f.write(f'# shot_interval_m={parameters.shot_interval_m:g}\n')
             f.write(f'# match_tolerance_m={parameters.match_tolerance_m:g}\n')
+            f.write(f'# recorder_gap_threshold_m={parameters.recorder_gap_threshold_m:g}\n')
             f.write(f'# recorder_gap_events={len(recorder_gaps or [])}\n')
             f.write(f'# unexplained_missing_positions={sum(g.unexplained_missing_positions for g in (recorder_gaps or []))}\n')
         if parameters is not None and recorder_gaps:

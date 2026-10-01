@@ -49,7 +49,7 @@ def analyse_recorder_gaps(eiva, recorder, results, parameters: AnalysisParameter
     for li, ri in zip(valid, valid[1:]):
         left, right = recorder[li], recorder[ri]
         distance = math.hypot(right.source_x - left.source_x, right.source_y - left.source_y)
-        if distance <= 1.5 * parameters.shot_interval_m:
+        if distance < parameters.recorder_gap_threshold_m:
             continue
         ratio = distance / parameters.shot_interval_m
         if not math.isfinite(ratio):
@@ -104,6 +104,7 @@ def analyse_recorder_gaps(eiva, recorder, results, parameters: AnalysisParameter
         shared = max(0, event.unexplained_missing_positions - len(event.eiva_only_indices))
         event.diagnostic = (
             f"Recorder spatial gap {left.ffid} -> {right.ffid} spans approximately {steps} shot intervals; "
+            f"distance threshold {parameters.recorder_gap_threshold_m:g} m; "
             f"{steps - 1} estimated missing intermediate positions; {ns} explicit NO_SHOT; "
             f"{event.unexplained_missing_positions} unexplained; {len(event.eiva_only_indices)} EIVA-only; "
             f"{shared} intermediate positions absent from both logs.")
@@ -126,7 +127,7 @@ def validate_gap_events(eiva, recorder, results, events, parameters):
     valid = [i for i, kind in enumerate(classes) if kind == "VALID"]
     expected_pairs = {(li, ri) for li, ri in zip(valid, valid[1:])
                       if math.hypot(recorder[ri].source_x - recorder[li].source_x,
-                                    recorder[ri].source_y - recorder[li].source_y) > 1.5 * parameters.shot_interval_m}
+                                    recorder[ri].source_y - recorder[li].source_y) >= parameters.recorder_gap_threshold_m}
     if {(g.left_recorder_source_index, g.right_recorder_source_index) for g in events} != expected_pairs or len(events) != len(expected_pairs):
         errors.append("Recorder gap coverage/anchor order mismatch")
     if len({g.event_id for g in events}) != len(events):

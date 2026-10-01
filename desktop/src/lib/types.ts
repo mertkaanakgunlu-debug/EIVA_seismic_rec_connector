@@ -106,7 +106,7 @@ export interface AnalysisSuccess {
   correction: CorrectionSummary;
   validation: ValidationSummary;
   input_hashes?: { eiva: string; recorder: string };
-  parameters: { shot_interval_m: number; match_tolerance_m: number };
+  parameters: { shot_interval_m: number; match_tolerance_m: number; recorder_gap_threshold_m: number };
   recorder_gaps: RecorderGapEvent[];
 }
 

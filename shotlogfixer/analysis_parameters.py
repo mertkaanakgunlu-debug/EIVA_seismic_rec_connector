@@ -23,6 +23,11 @@ class AnalysisParameters:
     def match_tolerance_m(self) -> float:
         return self.shot_interval_m / 2
 
+    @property
+    def recorder_gap_threshold_m(self) -> float:
+        return self.shot_interval_m * 5
+
     def as_dict(self):
         return {"shot_interval_m": self.shot_interval_m,
-                "match_tolerance_m": self.match_tolerance_m}
+                "match_tolerance_m": self.match_tolerance_m,
+                "recorder_gap_threshold_m": self.recorder_gap_threshold_m}
