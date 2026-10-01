@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from pathlib import Path
 
 from shotlogfixer.matcher import match_records
 from shotlogfixer.parsers import parse_eiva, parse_recorder
@@ -22,6 +23,8 @@ class App(tk.Tk):
         self.column_vars, self.column_defs = {}, {}
         self._eiva_position_by_result = {}
         self._timeline_hits = []
+        self._timeline_dragging = False
+        self._timeline_press_x = 0
         self._build()
 
     def _build(self):
@@ -51,13 +54,19 @@ class App(tk.Tk):
         self.timeline_scroll = ttk.Scrollbar(timeline_box, orient="horizontal", command=self.timeline.xview)
         self.timeline_scroll.pack(fill="x")
         self.timeline.configure(xscrollcommand=self._timeline_xscroll)
-        self.timeline.bind("<Button-1>", self._timeline_click)
+        self.timeline.bind("<ButtonPress-1>", self._timeline_press)
+        self.timeline.bind("<B1-Motion>", self._timeline_drag)
+        self.timeline.bind("<ButtonRelease-1>", self._timeline_release)
+        self.timeline.bind("<Shift-MouseWheel>", self._timeline_wheel)
+        self.timeline.bind("<Shift-Button-4>", lambda _event: self.timeline.xview_scroll(-3, "units"))
+        self.timeline.bind("<Shift-Button-5>", lambda _event: self.timeline.xview_scroll(3, "units"))
         self.timeline.bind("<Configure>", lambda _event: self._draw_timeline())
 
         table_head = ttk.Frame(self, padding=(8, 4, 8, 0))
         table_head.pack(fill="x")
         ttk.Label(table_head, text="QC detail").pack(side="left")
-        ttk.Button(table_head, text="Columns", command=self._columns_dialog).pack(side="right")
+        self.columns_button = ttk.Button(table_head, text="Columns", command=self._columns_dialog)
+        self.columns_button.pack(side="right")
         table_frame = ttk.Frame(self, padding=8)
         table_frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table_frame, show="headings")
@@ -90,12 +99,34 @@ class App(tk.Tk):
         setattr(self, f"{status.lower()}_value", value); setattr(self, f"{status.lower()}_position", position)
 
     def analyse(self):
+        eiva_path = self.eiva_path.get().strip()
+        recorder_path = self.recorder_path.get().strip()
+        if not eiva_path and not recorder_path:
+            self._show_error("Input files", "Please select both input files.")
+            return
+        if not eiva_path:
+            self._show_error("Input files", "Please select an EIVA log file.")
+            return
+        if not recorder_path:
+            self._show_error("Input files", "Please select a recorder header file.")
+            return
+        if not self._validate_path(eiva_path, "EIVA") or not self._validate_path(recorder_path, "recorder"):
+            return
+        self._clear_analysis()
         try:
-            self.eiva_records = parse_eiva(self.eiva_path.get())
-            recorder = parse_recorder(self.recorder_path.get())
-            self.results = match_records(self.eiva_records, recorder)
-        except Exception as exc:
-            messagebox.showerror("Analysis error", str(exc)); return
+            eiva_records = parse_eiva(eiva_path)
+        except PermissionError as exc:
+            self._show_error("EIVA file", "Unable to open the selected EIVA file.", str(exc)); return
+        except (OSError, ValueError) as exc:
+            self._show_error("EIVA file", "Unable to parse the selected EIVA file.", str(exc)); return
+        try:
+            recorder = parse_recorder(recorder_path)
+        except PermissionError as exc:
+            self._show_error("Recorder file", "Unable to open the selected recorder file.", str(exc)); return
+        except (OSError, ValueError) as exc:
+            self._show_error("Recorder file", "Unable to parse the selected recorder file.", str(exc)); return
+        self.eiva_records = eiva_records
+        self.results = match_records(eiva_records, recorder)
         self._configure_columns()
         self._populate_table()
         self._update_counters()
@@ -140,10 +171,30 @@ class App(tk.Tk):
 
     def _columns_dialog(self):
         if not self.results: return
-        window = tk.Toplevel(self); window.title("Columns"); window.transient(self); window.grab_set()
+        window = tk.Toplevel(self)
+        window.title("Columns")
+        window.transient(self)
+        window.resizable(False, True)
+        body = ttk.Frame(window, padding=8); body.pack(fill="both", expand=True)
+        canvas = tk.Canvas(body, width=300, height=min(430, max(150, len(self.column_defs) * 26)), highlightthickness=0)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        checks = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=checks, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        checks.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.grid(row=0, column=0, sticky="nsew"); scroll.grid(row=0, column=1, sticky="ns")
+        body.rowconfigure(0, weight=1); body.columnconfigure(0, weight=1)
         for row, key in enumerate(self.column_defs):
-            ttk.Checkbutton(window, text=self.column_defs[key], variable=self.column_vars[key]).grid(row=row, column=0, sticky="w", padx=10, pady=2)
-        ttk.Button(window, text="Apply", command=lambda: (self._populate_table(), window.destroy())).grid(row=len(self.column_defs), column=0, pady=8)
+            ttk.Checkbutton(checks, text=self.column_defs[key], variable=self.column_vars[key]).grid(row=row, column=0, sticky="w", padx=4, pady=2)
+        ttk.Button(body, text="Apply", command=lambda: (self._populate_table(), window.destroy())).grid(row=1, column=0, columnspan=2, pady=(8, 0))
+        window.update_idletasks()
+        x = self.columns_button.winfo_rootx()
+        y = self.columns_button.winfo_rooty() + self.columns_button.winfo_height() + 4
+        width, height = window.winfo_reqwidth(), window.winfo_reqheight()
+        x = max(0, min(x, self.winfo_screenwidth() - width - 8))
+        y = max(0, min(y, self.winfo_screenheight() - height - 8))
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.grab_set()
 
     def _update_counters(self):
         counts = {status: len(problem_result_indices(self.results, status)) for status in ("EIVA_ONLY", "RECORDER_INVALID", "REVIEW")}
@@ -203,6 +254,25 @@ class App(tk.Tk):
             self.timeline.create_rectangle(x, 8, x + 4, 38, fill=colors[status], outline=colors[status], tags=(f"result_{result_index}",))
         self._update_range_label()
 
+    def _timeline_press(self, event):
+        self._timeline_press_x = event.x
+        self._timeline_dragging = False
+        self.timeline.scan_mark(event.x, event.y)
+
+    def _timeline_drag(self, event):
+        if abs(event.x - self._timeline_press_x) > 3:
+            self._timeline_dragging = True
+        self.timeline.scan_dragto(event.x, event.y, gain=1)
+
+    def _timeline_release(self, event):
+        if not self._timeline_dragging:
+            self._timeline_click(event)
+
+    def _timeline_wheel(self, event):
+        delta = -1 if event.delta > 0 else 1
+        self.timeline.xview_scroll(delta * 3, "units")
+        return "break"
+
     def _timeline_click(self, event):
         x = self.timeline.canvasx(event.x); nearby = [(abs(x - marker), index) for marker, index in self._timeline_hits if abs(x - marker) <= self.TIMELINE_STEP * 2]
         if nearby: self._select_result(min(nearby)[1])
@@ -216,10 +286,46 @@ class App(tk.Tk):
         self.timeline_scroll.set(*args)
         self._update_range_label()
 
+    def _validate_path(self, value, label):
+        path = Path(value)
+        if not path.exists():
+            self._show_error("Input file", f"The selected {label} file does not exist:\n{value}")
+            return False
+        if not path.is_file():
+            self._show_error("Input file", f"The selected {label} path is not a file:\n{value}")
+            return False
+        return True
+
+    def _show_error(self, title, message, detail=None):
+        if detail:
+            message = f"{message}\n\nDetails: {detail}"
+        messagebox.showerror(title, message)
+
+    def _clear_analysis(self):
+        self.results, self.eiva_records = [], []
+        self.nav_positions, self.nav_current = {}, {}
+        for item in self.tree.get_children(): self.tree.delete(item)
+        self.timeline.delete("all")
+        self.timeline.configure(scrollregion=(0, 0, 0, 48))
+        self.range_label.config(text="Positions —")
+        self.matched_value.config(text="—")
+        for status in ("EIVA_ONLY", "RECORDER_INVALID", "REVIEW"):
+            getattr(self, f"{status.lower()}_value").config(text="—")
+            getattr(self, f"{status.lower()}_position").config(text="")
+        self.metrics.config(text="Flagged records: —   Anomaly events: —   Anomaly frequency: —")
+
     def export(self):
-        if not self.results: messagebox.showinfo("Export", "Analyse files first."); return
+        if not self.results:
+            self._show_error("Export QC CSV", "Please analyse a valid EIVA and recorder file pair first.")
+            return
         path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
-        if path: export_csv(path, self.results)
+        if not path: return
+        try:
+            export_csv(path, self.results)
+        except PermissionError as exc:
+            self._show_error("Export QC CSV", "Unable to write the QC CSV file.", str(exc))
+        except OSError as exc:
+            self._show_error("Export QC CSV", "Unable to write the QC CSV file.", str(exc))
 
 
 if __name__ == "__main__":
