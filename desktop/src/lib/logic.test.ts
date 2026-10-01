@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { columnAlignment, ffidJumpTargets, getCellValue, nextCycle, resolveThemePreference, summaryForDisplay, timelineLogicalX, timelinePositionForRecord, timelineRecordIndexAtX } from "./logic";
+import { formatDiagnostic, formatGapClassification, formatRecordStatus } from "./presentation";
 
 describe("navigation helpers", () => {
   it("wraps problem navigation in both directions", () => {
@@ -31,7 +32,7 @@ describe("navigation helpers", () => {
 
   it("resolves status display and FFID jump targets", () => {
     const records = [{ eiva_ffid: "543", status: "EIVA_ONLY", eiva_values: {} }, { eiva_ffid: "553", status: "MATCHED", eiva_values: {} }] as never[];
-    expect(getCellValue(records[0], "status")).toBe("EIVA_ONLY");
+    expect(getCellValue(records[0], "status")).toBe("EIVA only");
     expect(ffidJumpTargets(records, [{ from: "543", to: "553" }])).toEqual([1]);
     expect(columnAlignment("distance")).toBe("center");
     expect(columnAlignment("diagnostic")).toBe("left");
@@ -39,5 +40,16 @@ describe("navigation helpers", () => {
 
   it("keeps total issues as issue-region count", () => {
     expect(summaryForDisplay({ eiva_rows: 2816, recorder_rows: 2814, matched: 2813, eiva_only: 2, recorder_invalid: 1, review: 1, total_issues: 2 }).totalIssues).toBe(2);
+  });
+
+  it("keeps canonical codes while presenting readable labels", () => {
+    expect(formatRecordStatus("MATCHED")).toBe("Matched");
+    expect(formatRecordStatus("EIVA_ONLY")).toBe("EIVA only");
+    expect(formatRecordStatus("NO_SHOT")).toBe("Not recorded");
+    expect(formatRecordStatus("RECORDER_INVALID")).toBe("Invalid");
+    expect(formatRecordStatus("REVIEW")).toBe("Review");
+    expect(formatGapClassification("RECORDER_GAP_MIXED")).toBe("Mixed");
+    expect(formatGapClassification("RECORDER_GAP_AMBIGUOUS")).toBe("Needs review");
+    expect(formatDiagnostic("NO_SHOT RECORDER_GAP_MIXED")).toBe("Not recorded Mixed");
   });
 });

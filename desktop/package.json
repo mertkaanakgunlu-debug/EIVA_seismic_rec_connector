@@ -1,17 +1,19 @@
 {
   "name": "shotlogfixer-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
+  "description": "Offline seismic acquisition QC and correction utility",
+  "author": "ShotLogFixer",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron . --dev-url=http://127.0.0.1:5173\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "vitest run",
     "build": "npm run typecheck && vite build && tsc -p tsconfig.electron.json",
-    "electron:smoke": "npm run build && electron dist-electron/main.js --smoke --renderer-diagnostics"
+    "electron:smoke": "npm run build && electron dist-electron/main.js --smoke --renderer-diagnostics",
+    "package:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/build-portable.ps1"
   },
   "dependencies": {
-    "electron": "^38.2.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
@@ -26,6 +28,41 @@
     "typescript": "^5.9.3",
     "vite": "^7.1.7",
     "vitest": "^3.2.4",
-    "wait-on": "^8.0.4"
+    "wait-on": "^8.0.4",
+    "electron-builder": "^26.0.12",
+    "electron": "^38.2.0"
+  },
+  "build": {
+    "appId": "com.shotlogfixer.desktop",
+    "productName": "ShotLogFixer",
+    "directories": {
+      "output": "../release-builder"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../packaging/out/shotlogfixer-engine",
+        "to": "engine"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "executableName": "ShotLogFixer-Portable",
+      "artifactName": "ShotLogFixer-Portable.${ext}"
+    },
+    "portable": {
+      "artifactName": "ShotLogFixer-Portable.${ext}"
+    }
   }
 }

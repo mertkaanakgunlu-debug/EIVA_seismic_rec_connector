@@ -1,4 +1,5 @@
 import type { AnalysisSummary, EngineRecord, Status } from "./types";
+import { formatDiagnostic, formatRecordStatus } from "./presentation";
 
 export function nextCycle(indices: number[], current: number | null, step: 1 | -1): number | null {
   if (!indices.length) return null;
@@ -53,12 +54,12 @@ export function getCellValue(record: EngineRecord, key: string): string {
     case "eiva_ffid": return record.eiva_ffid || "";
     case "recorder_ffid": return record.recorder_ffid || "";
     case "eiva_coord": return formatCoordinate(record.eiva_easting, record.eiva_northing);
-    case "recorder_coord": return record.status === "NO_SHOT" ? "No shot recorded" : formatCoordinate(record.recorder_x, record.recorder_y);
+    case "recorder_coord": return record.status === "NO_SHOT" ? "Not recorded" : formatCoordinate(record.recorder_x, record.recorder_y);
     case "distance": return record.distance_m === null ? "" : record.distance_m.toFixed(3);
-    case "status": return record.status;
+    case "status": return formatRecordStatus(record.status);
     case "recorder_x": return record.recorder_x === null ? "" : record.recorder_x.toFixed(2);
     case "recorder_y": return record.recorder_y === null ? "" : record.recorder_y.toFixed(2);
-    case "diagnostic": return record.diagnostic;
+    case "diagnostic": return formatDiagnostic(record.diagnostic);
     case "gap": return record.gap_event_ids?.join(", ") || "";
     default: return key.startsWith("eiva_raw:") ? record.eiva_values[key.slice("eiva_raw:".length)] || "" : "";
   }

@@ -19,6 +19,7 @@ from .matcher import match_records
 from .parsers import parse_eiva, parse_recorder
 from .qc import ffid_discontinuities, total_issue_count
 from .report import export_csv, export_txt
+from .version import __version__
 
 
 def _error(code: str, message: str, detail: str | None = None) -> dict[str, Any]:
@@ -213,6 +214,10 @@ def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interva
         if output.suffix.lower() == ".csv":
             export_csv(output, raw_results)
         else:
+            # Export the same resolved records and gap attribution the operator
+            # reviewed; retain the legacy raw CSV API above for integrations.
+            bundle = prepare_correction(eiva, recorder, parameters)
+            raw_results, gaps = bundle.results, bundle.recorder_gaps
             export_txt(output, raw_results, parameters, gaps)
     except PermissionError as exc:
         return _error("EXPORT_PERMISSION_DENIED", "Unable to write the QC TXT file.", str(exc))
@@ -241,10 +246,13 @@ def main() -> int:
             response = _error("INVALID_REQUEST", "The engine request must be a JSON object.")
         else:
             response = dispatch(payload)
+        response.setdefault("version", __version__)
     except json.JSONDecodeError as exc:
         response = _error("INVALID_REQUEST", "The engine request was not valid JSON.", str(exc))
+        response["version"] = __version__
     except Exception as exc:  # Keep tracebacks out of the renderer contract.
         response = _error("ENGINE_FAILURE", "The ShotLogFixer engine could not complete the request.", str(exc))
+        response["version"] = __version__
     print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
     return 0 if response.get("ok") else 1
 

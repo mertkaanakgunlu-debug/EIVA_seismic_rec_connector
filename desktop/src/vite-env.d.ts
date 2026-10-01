@@ -1,6 +1,7 @@
 import type { AnalysisResponse, ExportResponse } from "./lib/types";
 
 declare global {
+  const __APP_VERSION__: string;
   interface Window {
     shotlogfixerHeartbeat?: () => { ticks: number; frames: number; lastTick: number; phase: string; counters: Record<string, number> };
     shotlogfixerTest?: { setFiles: (eivaPath: string, recorderPath: string) => void };

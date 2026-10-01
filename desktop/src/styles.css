@@ -167,6 +167,7 @@ tbody tr[data-selected="true"] td { background: var(--selected); }
 .status-cell.status-no_shot { color: var(--review); }
 .empty-table { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: var(--muted); font-size: 12px; }
 .app-footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 11px 28px 15px; color: var(--muted); font-size: 11px; }
+.app-version { color: var(--muted); font-variant-numeric: tabular-nums; }
 .toast { position: fixed; right: 25px; bottom: 22px; z-index: 20; padding: 10px 13px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 7px 20px rgba(0,0,0,.22); }
 
 @media (max-width: 760px) {

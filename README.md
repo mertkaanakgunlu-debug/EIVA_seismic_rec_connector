@@ -1,10 +1,10 @@
-# ShotLogFixer Phase 1
+# ShotLogFixer 0.3.0
 
 Offline QC utility comparing an EIVA navigation CSV/TXT log with a whitespace-delimited seismic recorder header. It uses only `E(Spark), N(Spark)` against `SOU_X, SOU_Y` in acquisition order; FFID and timestamps are retained for audit but never used as matching keys. The operator supplies the nominal shot interval; matching uses Euclidean distance with the derived half-interval tolerance. `MATCHED`, `EIVA_ONLY`, `NO_SHOT`, `RECORDER_INVALID`, and `REVIEW` describe record-level QC, while Recorder spatial gaps are separate geometry events. Source files are never modified.
 
-Run the GUI with `python app.py`. Run tests with `pytest`. Build on Windows with `pyinstaller --onefile --windowed app.py`.
+Run the GUI with `python app.py`. Run tests with `pytest`. Build the portable Windows release with `npm run package:portable` from `desktop/`. The result is `release/ShotLogFixer-Portable.exe`; it bundles the Python engine and does not require system Python or Node at runtime.
 
-The GUI provides a horizontally scrollable, acquisition-order timeline with clickable problem markers. EIVA-only, NO_SHOT, recorder-invalid, review, and FFID-jump events share synchronized wrapped navigation. The default table shows FFIDs, coordinate pairs, distance, and status; optional raw EIVA columns and diagnostics can be enabled with **Columns**. QC TXT export always retains the complete audit fields regardless of table visibility.
+The GUI provides a horizontally scrollable, acquisition-order timeline with clickable problem markers. The issue counters use readable labels such as **EIVA only**, **Not recorded**, **Invalid**, and **Review**; FFID jumps are summarized by count and individual transitions appear when a jump is inspected. The default table shows FFIDs, coordinate pairs, distance, and status; optional raw EIVA columns and diagnostics can be enabled with **Columns**. QC TXT export retains readable labels together with canonical code columns regardless of table visibility. The footer shows the packaged application version.
 
 ## Electron/React desktop UI
 
@@ -27,7 +27,7 @@ The renderer keeps the compact Phase 2 layout and canvas acquisition timeline. T
 
 To run the diagnostic smoke test, use `npm run electron:smoke`. It clicks the real ThemePicker and Columns controls, waits for two animation frames after each theme change, and verifies heartbeat progress. An analysis smoke pass can be added by setting `SHOTLOGFIXER_SMOKE_EIVA` and `SHOTLOGFIXER_SMOKE_RECORDER` to deterministic fixture paths before running the command; it drives the real Analyse button and checks the post-commit UI. For controlled isolation runs, pass `--isolation=header-only`, `--isolation=no-table`, `--isolation=no-timeline`, or `--css=minimal` after the Electron entry point. Diagnostics are opt-in with `--renderer-diagnostics`; normal `electron .` runs stay quiet and packaged builds do not enable them.
 
-The adapter can also be called directly with JSON on stdin:
+The adapter reports version `0.3.0` in its structured response. The adapter can also be called directly with JSON on stdin:
 
 ```text
 python -m shotlogfixer.engine_cli

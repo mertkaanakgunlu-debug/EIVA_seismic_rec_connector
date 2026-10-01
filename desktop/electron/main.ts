@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
-const projectRoot = process.env.SHOTLOGFIXER_PROJECT_ROOT || path.resolve(__dirname, "../..");
+const projectRoot = app.isPackaged ? process.resourcesPath : process.env.SHOTLOGFIXER_PROJECT_ROOT || path.resolve(__dirname, "../..");
 const diagnosticsEnabled = process.argv.includes("--renderer-diagnostics");
 let lastHeartbeat: Record<string, unknown> | null = null;
 let lastLoggedHeartbeat = "";
@@ -14,7 +14,7 @@ function engineCommand() {
     return { command: path.join(process.resourcesPath, "engine", "shotlogfixer-engine.exe"), args: [] };
   }
   return {
-    command: process.env.SHOTLOGFIXER_PYTHON || "python",
+    command: process.env.SHOTLOGFIXER_PYTHON || (process.platform === "win32" ? "py" : "python3"),
     args: ["-m", "shotlogfixer.engine_cli"],
   };
 }
@@ -28,7 +28,7 @@ function runEngine(payload: Record<string, unknown>, label = String(payload.acti
   return new Promise((resolve) => {
     const started = performance.now();
     const { command, args } = engineCommand();
-    diagnosticLog(`${label}: spawn-start`, { command, args, atMs: started });
+    diagnosticLog(`${label}: spawn-start`, { command, args, cwd: projectRoot, packaged: app.isPackaged, atMs: started });
     const child = spawn(command, args, { cwd: projectRoot, shell: false, windowsHide: true });
     let stdout = "";
     let stderr = "";
@@ -260,8 +260,26 @@ async function runSmoke(window: BrowserWindow) {
           return;
         }
         diagnosticLog("analysis-smoke-passed", { heartbeat: analysisHeartbeat, resultText: analysisDone.text });
+        const smokeOutputDir = process.env.SHOTLOGFIXER_SMOKE_OUTPUT_DIR;
+        if (smokeOutputDir) {
+          mkdirSync(smokeOutputDir, { recursive: true });
+          const qcPath = path.join(smokeOutputDir, "portable-smoke-qc.txt");
+          const fixedEivaPath = path.join(smokeOutputDir, "portable-smoke-eiva-fixed.txt");
+          const fixedRecorderPath = path.join(smokeOutputDir, "portable-smoke-recorder-fixed.txt");
+          const requestBase = { eiva_path: smokeEiva, recorder_path: smokeRecorder, shot_interval_m: 3.125 };
+          const [qc, fixedPair] = await Promise.all([
+            runEngine({ action: "export_qc", ...requestBase, output_path: qcPath }, "smoke-export-qc"),
+            runEngine({ action: "save_fixed_pair", ...requestBase, eiva_output: fixedEivaPath, recorder_output: fixedRecorderPath, overwrite: true }, "smoke-save-fixed-pair"),
+          ]);
+          if (!qc.ok || !fixedPair.ok || !existsSync(qcPath) || !existsSync(fixedEivaPath) || !existsSync(fixedRecorderPath)) {
+            console.error("Electron packaged smoke failed: bundled engine did not produce validated outputs.");
+            app.exit(1);
+            return;
+          }
+          diagnosticLog("packaged-output-smoke-passed", { outputDir: smokeOutputDir, qcPath, fixedEivaPath, fixedRecorderPath });
+        }
       }
-      console.log("Electron smoke passed: actual ThemePicker, animation frames, heartbeat, and Columns interaction verified.");
+      console.log("Electron smoke passed: actual ThemePicker, animation frames, heartbeat, Columns, and optional bundled-output checks verified.");
       app.exit(0);
     } catch (error) {
       console.error("Smoke check failed:", error);

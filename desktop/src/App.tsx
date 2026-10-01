@@ -3,6 +3,7 @@ import { basename, columnAlignment, ffidJumpTargets, getCellValue, nextCycle, re
 import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, RecorderGapEvent } from "./lib/types";
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
+import { formatDiagnostic, formatGapClassification, formatRecordStatus } from "./lib/presentation";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
@@ -62,7 +63,7 @@ function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (v
 
 function errorMessage(response: AnalysisResponse | ExportResponse): string {
   const error = "error" in response ? response.error : undefined;
-  if (error?.message) return error.detail ? `${error.message} ${error.detail}` : error.message;
+  if (error?.message) return formatDiagnostic(error.detail ? `${error.message} ${error.detail}` : error.message);
   return "The requested operation could not be completed.";
 }
 
@@ -327,13 +328,15 @@ export default function App() {
     });
     if (gap) {
       setTimelineTooltip({ x: event.clientX - timelineRef.current.getBoundingClientRect().left, y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7,
-        text: `Recorder Gap\n${gap.left_recorder_ffid} → ${gap.right_recorder_ffid}\n${gap.distance_m.toFixed(3)} m | ${gap.gap_span_steps} span steps\n${gap.estimated_missing_positions} estimated missing intermediate positions\n${gap.explicit_no_shot_count} explicit NO_SHOT | ${gap.unexplained_missing_positions} unexplained\n${gap.classification}\n${gap.diagnostic}` });
+        text: `Recorder Gap\n${gap.left_recorder_ffid} → ${gap.right_recorder_ffid}\n${gap.distance_m.toFixed(3)} m | ${gap.gap_span_steps} span steps\n${gap.estimated_missing_positions} estimated missing intermediate positions\n${gap.explicit_no_shot_count} explicit not-recorded rows | ${gap.unexplained_missing_positions} unexplained\n${formatGapClassification(gap.classification)}\n${formatDiagnostic(gap.diagnostic)}` });
       return;
     }
     const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
     if (index === null) { setTimelineTooltip(null); return; }
     const record = records[index];
-    setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: record.status === "MATCHED" ? `EIVA ${record.eiva_ffid || "—"} → Recorder ${record.recorder_ffid || "—"}\n${record.distance_m?.toFixed(3) || "—"} m` : `EIVA ${record.eiva_ffid || "—"}\n${record.status}` });
+    const jump = analysis?.ffid_jumps.find((_, jumpIndex) => jumpTargets[jumpIndex] === index);
+    const jumpDetail = jump ? `\nFFID jump ${jump.from} → ${jump.to}` : "";
+    setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: (record.status === "MATCHED" ? `EIVA ${record.eiva_ffid || "—"} → Recorder ${record.recorder_ffid || "—"}\n${record.distance_m?.toFixed(3) || "—"} m` : `EIVA ${record.eiva_ffid || "—"}\n${formatRecordStatus(record.status)}`) + jumpDetail });
   };
   const handleTimelineLeave = () => setTimelineTooltip(null);
 
@@ -409,20 +412,20 @@ export default function App() {
       <section className="summary-section" aria-label="Analysis summary">
         <div className="summary-line">
           <span className="summary-item">Matched <b>{analysis ? analysis.summary.matched : "—"}</b></span>
-          <Counter label="EIVA Only" status="EIVA_ONLY" count={analysis?.summary.eiva_only} current={navCurrent.EIVA_ONLY} ordinal={problemGroups.EIVA_ONLY.indexOf(navCurrent.EIVA_ONLY ?? -1) + 1} total={problemGroups.EIVA_ONLY.length} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label="NO_SHOT" status="NO_SHOT" count={analysis ? analysis.summary.no_shot ?? 0 : undefined} current={navCurrent.NO_SHOT} ordinal={problemGroups.NO_SHOT.indexOf(navCurrent.NO_SHOT ?? -1) + 1} total={problemGroups.NO_SHOT.length} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label={formatRecordStatus("EIVA_ONLY")} status="EIVA_ONLY" count={analysis?.summary.eiva_only} current={navCurrent.EIVA_ONLY} ordinal={problemGroups.EIVA_ONLY.indexOf(navCurrent.EIVA_ONLY ?? -1) + 1} total={problemGroups.EIVA_ONLY.length} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label={formatRecordStatus("NO_SHOT")} status="NO_SHOT" count={analysis ? analysis.summary.no_shot ?? 0 : undefined} current={navCurrent.NO_SHOT} ordinal={problemGroups.NO_SHOT.indexOf(navCurrent.NO_SHOT ?? -1) + 1} total={problemGroups.NO_SHOT.length} onNavigate={navigate} onFocus={focusIssue} />
           <Counter label="Invalid" status="RECORDER_INVALID" count={analysis?.summary.recorder_invalid} current={navCurrent.RECORDER_INVALID} ordinal={problemGroups.RECORDER_INVALID.indexOf(navCurrent.RECORDER_INVALID ?? -1) + 1} total={problemGroups.RECORDER_INVALID.length} onNavigate={navigate} onFocus={focusIssue} />
           <Counter label="Review" status="REVIEW" count={analysis?.summary.review} current={navCurrent.REVIEW} ordinal={problemGroups.REVIEW.indexOf(navCurrent.REVIEW ?? -1) + 1} total={problemGroups.REVIEW.length} onNavigate={navigate} onFocus={focusIssue} />
           <GapCounter gaps={analysis?.recorder_gaps || []} current={gapCurrent} onFocus={focusGap} onNavigate={navigateGap} />
         </div>
-        <div className="summary-detail"><span>Total issues: <b>{analysis ? analysis.summary.total_issues : "—"}</b></span><span>Missing positions: <b>{analysis ? analysis.summary.unexplained_missing_positions : "—"}</b></span><JumpNavigation jumps={analysis?.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} /></div>
+        <div className="summary-detail"><span>Total issues: <b>{analysis ? analysis.summary.total_issues : "—"}</b></span><JumpNavigation jumps={analysis?.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} /></div>
         {analysis && <div className={`correction-line ${correctionReady ? "correction-ready" : "correction-blocked"}`}>
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
             ? `${analysis.correction.retained.toLocaleString()} paired shots | ${analysis.summary.total_issues} issues resolved | Validation PASS`
-            : analysis.correction.blocking_reasons.join("; ") || analysis.validation.errors.join("; ") || "Validation did not pass"}</span>
+            : formatDiagnostic(analysis.correction.blocking_reasons.join("; ") || analysis.validation.errors.join("; ") || "Validation did not pass")}</span>
         </div>}
-        {analysis && <div className="correction-preview"><span>Retained / renumbered: <b>{analysis.correction.retained.toLocaleString()}</b></span><span>EIVA-only removed: <b>{analysis.correction.eiva_only_removed}</b></span><span>NO_SHOT removed: <b>{analysis.correction.no_shot_removed}</b></span><span>Fixed pair rows: <b>{analysis.validation.fixed_eiva_rows.toLocaleString()}</b></span><span>FFID: <b>{analysis.validation.ffid_match_count}/{analysis.validation.ffid_pair_count}</b></span><span>Coordinates: <b>{analysis.validation.coordinate_pass_count}/{analysis.validation.ffid_pair_count}</b></span><span>Max distance: <b>{analysis.validation.max_distance_m === null ? "—" : `${analysis.validation.max_distance_m.toFixed(3)} m`}</b></span></div>}
+        {analysis && <div className="correction-preview"><span>Retained / renumbered: <b>{analysis.correction.retained.toLocaleString()}</b></span><span>EIVA-only removed: <b>{analysis.correction.eiva_only_removed}</b></span><span>Not-recorded rows removed: <b>{analysis.correction.no_shot_removed}</b></span><span>Fixed pair rows: <b>{analysis.validation.fixed_eiva_rows.toLocaleString()}</b></span><span>FFID: <b>{analysis.validation.ffid_match_count}/{analysis.validation.ffid_pair_count}</b></span><span>Coordinates: <b>{analysis.validation.coordinate_pass_count}/{analysis.validation.ffid_pair_count}</b></span><span>Max EIVA–Recorder difference: <b>{analysis.validation.max_distance_m === null ? "—" : `${analysis.validation.max_distance_m.toFixed(3)} m`}</b></span></div>}
       </section>
 
       <section className="timeline-section" aria-label="Acquisition timeline">
@@ -447,7 +450,7 @@ export default function App() {
         </div>
       </section>
     </main>
-    <footer className="app-footer"><span>{analysis ? `${records.length.toLocaleString()} result rows` : "Ready for an offline analysis"}</span></footer>
+    <footer className="app-footer"><span>{analysis ? `${records.length.toLocaleString()} result rows` : "Ready for an offline analysis"}</span><span className="app-version">Version {__APP_VERSION__}</span></footer>
     {toast && <div className="toast" role="status">{toast}</div>}
   </div>;
 }
@@ -463,17 +466,13 @@ function GapCounter({ gaps, current, onFocus, onNavigate }: { gaps: RecorderGapE
   return <span className="summary-item summary-recorder-gap">
     {gaps.length ? <button className="summary-trigger" onClick={() => onFocus(current ?? 0)}>Recorder Gaps <b>{gaps.length}</b></button> : <>Recorder Gaps <b>0</b></>}
     {gaps.length > 1 && <span className="counter-nav"><button className="icon-button" onClick={() => onNavigate(-1)} title="Previous Recorder gap"><Icon name="left" /></button><span>{(current ?? 0) + 1} / {gaps.length}</span><button className="icon-button" onClick={() => onNavigate(1)} title="Next Recorder gap"><Icon name="right" /></button></span>}
-    {gap && <span className="gap-classification" title={gap.diagnostic}>{gap.classification.replace("RECORDER_GAP_", "")}</span>}
+    {gap && <span className="gap-classification" title={formatDiagnostic(gap.diagnostic)}>{formatGapClassification(gap.classification)}</span>}
   </span>;
 }
 
 function JumpNavigation({ jumps, current, targets, onFocus, onNavigate }: { jumps: Array<{ from: string; to: string }>; current: number | null; targets: Array<number | null>; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
-  if (!jumps.length) return <span className="jump-navigation">FFID jump: <b>none</b></span>;
-  const jump = jumps[current ?? 0];
-  const transition = `${jump.from} → ${jump.to}`;
   return <span className="jump-navigation">
-    <EventNavigation label={jumps.length === 1 ? "FFID jump:" : "FFID jumps:"} value={jumps.length === 1 ? transition : jumps.length} total={targets.some((target) => target !== null) ? jumps.length : 0} ordinal={(current ?? 0) + 1} onFocus={onFocus} onNavigate={onNavigate} />
-    {jumps.length > 1 && <b className="jump-transition">{transition}</b>}
+    <EventNavigation label="FFID Jumps" value={jumps.length} total={targets.some((target) => target !== null) ? jumps.length : 0} ordinal={(current ?? 0) + 1} onFocus={onFocus} onNavigate={onNavigate} />
   </span>;
 }
 
