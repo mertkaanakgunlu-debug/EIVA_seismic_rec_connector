@@ -18,7 +18,8 @@ def _read(path: Path) -> str:
 def parse_eiva(path: str | Path) -> list[EivaRecord]:
     rows = list(csv.reader(_read(Path(path)).splitlines()))
     if not rows: raise ValueError("EIVA file is empty")
-    header = [h.strip().lower() for h in rows[0]]
+    original_header = [h.strip() for h in rows[0]]
+    header = [h.lower() for h in original_header]
     required = {"ffid", "e(spark)", "n(spark)"}
     missing = required - set(header)
     if missing: raise ValueError(f"EIVA header missing columns: {', '.join(sorted(missing))}")
@@ -27,7 +28,8 @@ def parse_eiva(path: str | Path) -> list[EivaRecord]:
     for line, fields in enumerate(rows[1:], 2):
         if not any(x.strip() for x in fields): continue
         try:
-            out.append(EivaRecord(line, fields[ix['ffid']].strip(), float(fields[ix['e(spark)']]), float(fields[ix['n(spark)']]), fields))
+            values = dict(zip(original_header, fields))
+            out.append(EivaRecord(line, fields[ix['ffid']].strip(), float(fields[ix['e(spark)']]), float(fields[ix['n(spark)']]), fields, values))
         except (IndexError, ValueError) as exc:
             raise ValueError(f"Malformed EIVA row at line {line}: {exc}") from exc
     return out

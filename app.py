@@ -1,37 +1,226 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from shotlogfixer.parsers import parse_eiva, parse_recorder
+from tkinter import filedialog, messagebox, ttk
+
 from shotlogfixer.matcher import match_records
+from shotlogfixer.parsers import parse_eiva, parse_recorder
+from shotlogfixer.qc import (anomaly_event_count, anomaly_frequency_per_1000,
+                             ffid_discontinuities, next_cycle,
+                             problem_result_indices)
 from shotlogfixer.report import export_csv
 
+
 class App(tk.Tk):
+    TIMELINE_STEP = 6
+
     def __init__(self):
-        super().__init__(); self.title('ShotLogFixer Phase 1'); self.geometry('1050x700'); self.results=[]
-        self.eiva = tk.StringVar(); self.rec = tk.StringVar(); self._build()
+        super().__init__()
+        self.title("ShotLogFixer Phase 1 QC")
+        self.geometry("1120x760")
+        self.eiva_path, self.recorder_path = tk.StringVar(), tk.StringVar()
+        self.results, self.eiva_records = [], []
+        self.nav_positions, self.nav_current = {}, {}
+        self.column_vars, self.column_defs = {}, {}
+        self._eiva_position_by_result = {}
+        self._timeline_hits = []
+        self._build()
+
     def _build(self):
-        top=ttk.Frame(self,padding=8); top.pack(fill='x')
-        for label,var in [('EIVA Log',self.eiva),('Recorder Log',self.rec)]:
-            ttk.Label(top,text=label).pack(side='left'); ttk.Entry(top,textvariable=var,width=55).pack(side='left',padx=5); ttk.Button(top,text='Select File',command=lambda v=var:v.set(filedialog.askopenfilename())).pack(side='left',padx=4)
-        ttk.Button(top,text='ANALYSE',command=self.analyse).pack(side='left',padx=10); ttk.Button(top,text='Export QC CSV',command=self.export).pack(side='left')
-        self.summary=ttk.Label(self,padding=8); self.summary.pack(anchor='w'); self.canvas=tk.Canvas(self,height=45,bg='white'); self.canvas.pack(fill='x',padx=8)
-        frame=ttk.Frame(self); frame.pack(fill='both',expand=True,padx=8,pady=8); cols=('eiva','rec','dist','status','diag'); self.tree=ttk.Treeview(frame,columns=cols,show='headings')
-        for c,h,w in zip(cols,('EIVA FFID','Recorder FFID','Distance (m)','Status','Diagnostic'),(130,140,120,140,500)): self.tree.heading(c,text=h); self.tree.column(c,width=w)
-        sb=ttk.Scrollbar(frame,orient='vertical',command=self.tree.yview); self.tree.configure(yscrollcommand=sb.set); self.tree.pack(side='left',fill='both',expand=True); sb.pack(side='right',fill='y')
+        inputs = ttk.LabelFrame(self, text="Input files", padding=6)
+        inputs.pack(fill="x", padx=8, pady=(8, 4))
+        for row, (label, variable) in enumerate((("EIVA Log", self.eiva_path), ("Recorder Log", self.recorder_path))):
+            ttk.Label(inputs, text=label, width=14).grid(row=row, column=0, sticky="w")
+            ttk.Entry(inputs, textvariable=variable, width=85).grid(row=row, column=1, sticky="ew", padx=5)
+            ttk.Button(inputs, text="Select File", command=lambda v=variable: v.set(filedialog.askopenfilename())).grid(row=row, column=2)
+        inputs.columnconfigure(1, weight=1)
+        ttk.Button(inputs, text="ANALYSE", command=self.analyse).grid(row=0, column=3, rowspan=2, padx=(12, 0), sticky="ns")
+
+        self.summary = ttk.Frame(self, padding=(8, 4))
+        self.summary.pack(fill="x")
+        self._make_counter_row("Matched", informational=True)
+        for status, label in (("EIVA_ONLY", "EIVA-only"), ("RECORDER_INVALID", "Invalid"), ("REVIEW", "Review")):
+            self._make_counter_row(label, status)
+        self.metrics = ttk.Label(self.summary, text="Flagged records: —   Anomaly events: —   Anomaly frequency: —")
+        self.metrics.grid(row=4, column=0, columnspan=5, sticky="w", pady=(3, 0))
+
+        timeline_box = ttk.LabelFrame(self, text="Acquisition timeline", padding=5)
+        timeline_box.pack(fill="x", padx=8, pady=4)
+        self.range_label = ttk.Label(timeline_box, text="Positions —")
+        self.range_label.pack(anchor="w")
+        self.timeline = tk.Canvas(timeline_box, height=48, bg="white", highlightthickness=1, highlightbackground="#bbb")
+        self.timeline.pack(fill="x", expand=True)
+        self.timeline_scroll = ttk.Scrollbar(timeline_box, orient="horizontal", command=self.timeline.xview)
+        self.timeline_scroll.pack(fill="x")
+        self.timeline.configure(xscrollcommand=self._timeline_xscroll)
+        self.timeline.bind("<Button-1>", self._timeline_click)
+        self.timeline.bind("<Configure>", lambda _event: self._draw_timeline())
+
+        table_head = ttk.Frame(self, padding=(8, 4, 8, 0))
+        table_head.pack(fill="x")
+        ttk.Label(table_head, text="QC detail").pack(side="left")
+        ttk.Button(table_head, text="Columns", command=self._columns_dialog).pack(side="right")
+        table_frame = ttk.Frame(self, padding=8)
+        table_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(table_frame, show="headings")
+        self.tree_scroll_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree_scroll_x = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=self.tree_scroll_y.set, xscrollcommand=self.tree_scroll_x.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.tree_scroll_x.grid(row=1, column=0, sticky="ew")
+        table_frame.rowconfigure(0, weight=1); table_frame.columnconfigure(0, weight=1)
+        self.tree.bind("<<TreeviewSelect>>", self._table_selected)
+
+        bottom = ttk.Frame(self, padding=(8, 0, 8, 8)); bottom.pack(fill="x")
+        ttk.Button(bottom, text="Export QC CSV", command=self.export).pack(side="right")
+
+    def _make_counter_row(self, label, status=None, informational=False):
+        row = 0 if informational else {"EIVA_ONLY": 1, "RECORDER_INVALID": 2, "REVIEW": 3}[status]
+        label_widget = ttk.Label(self.summary, text=f"{label}:")
+        label_widget.grid(row=row, column=0, sticky="w")
+        value = ttk.Label(self.summary, text="—", width=8)
+        value.grid(row=row, column=1, sticky="w")
+        if informational:
+            self.matched_value = value
+            return
+        position = ttk.Label(self.summary, text="", width=8); position.grid(row=row, column=2, sticky="w")
+        prev = ttk.Button(self.summary, text="<", width=3, command=lambda s=status: self._navigate(s, -1)); prev.grid(row=row, column=3)
+        nxt = ttk.Button(self.summary, text=">", width=3, command=lambda s=status: self._navigate(s, 1)); nxt.grid(row=row, column=4)
+        value.bind("<Button-1>", lambda _event, s=status: self._navigate(s, 1))
+        label_widget.bind("<Button-1>", lambda _event, s=status: self._navigate(s, 1))
+        setattr(self, f"{status.lower()}_value", value); setattr(self, f"{status.lower()}_position", position)
+
     def analyse(self):
-        try: self.results=match_records(parse_eiva(self.eiva.get()),parse_recorder(self.rec.get()))
-        except Exception as e: messagebox.showerror('Analysis error',str(e)); return
-        for x in self.tree.get_children(): self.tree.delete(x)
-        for r in self.results: self.tree.insert('', 'end', values=(r.eiva_record.original_ffid if r.eiva_record else '',r.recorder_record.ffid if r.recorder_record else '',f'{r.distance_m:.3f}' if r.distance_m is not None else '',r.status,r.diagnostic))
-        counts={s:sum(r.status==s for r in self.results) for s in ('MATCHED','EIVA_ONLY','RECORDER_INVALID','REVIEW')}; self.summary.config(text=f"EIVA rows: {sum(bool(r.eiva_record) for r in self.results)}  Recorder rows: {sum(bool(r.recorder_record) for r in self.results)}  Matched: {counts['MATCHED']}  EIVA-only: {counts['EIVA_ONLY']}  Invalid: {counts['RECORDER_INVALID']}  Review: {counts['REVIEW']}"); self._draw()
-    def _draw(self):
-        self.canvas.delete('all'); ordered=sorted((r for r in self.results if r.eiva_record), key=lambda r: r.eiva_record.source_line_number); n=max(1,len(ordered)); w=max(self.canvas.winfo_width(),100); bins={}; priority={'MATCHED':0,'EIVA_ONLY':1,'REVIEW':2,'RECORDER_INVALID':2}
-        for index, r in enumerate(ordered):
-            pixel=round(5+(w-10)*index/max(1,n-1)); current=bins.get(pixel)
-            if current is None or priority.get(r.status,0)>priority.get(current,0): bins[pixel]=r.status
-        for x, status in bins.items():
-            color={'MATCHED':'#2e9d50','EIVA_ONLY':'#d33','REVIEW':'#f90','RECORDER_INVALID':'#f90'}.get(status,'#999'); self.canvas.create_rectangle(x,12,x+2,35,fill=color,outline=color)
+        try:
+            self.eiva_records = parse_eiva(self.eiva_path.get())
+            recorder = parse_recorder(self.recorder_path.get())
+            self.results = match_records(self.eiva_records, recorder)
+        except Exception as exc:
+            messagebox.showerror("Analysis error", str(exc)); return
+        self._configure_columns()
+        self._populate_table()
+        self._update_counters()
+        self._draw_timeline()
+
+    def _configure_columns(self):
+        self.column_defs = {
+            "eiva_ffid": "EIVA FFID", "recorder_ffid": "Recorder FFID",
+            "eiva_coord": "EIVA Coordinate", "recorder_coord": "Recorder Coordinate",
+            "distance": "Distance (m)", "status": "Status", "diagnostic": "Diagnostic",
+            "recorder_x": "Recorder SOU_X", "recorder_y": "Recorder SOU_Y",
+        }
+        for header in (self.eiva_records[0].original_values_by_column if self.eiva_records else {}):
+            self.column_defs.setdefault("eiva_raw:" + header, "EIVA " + header)
+        defaults = {key for key in self.column_defs if key in {"eiva_ffid", "recorder_ffid", "eiva_coord", "recorder_coord", "distance", "status"}}
+        old = {key for key, var in self.column_vars.items() if var.get()}
+        self.column_vars = {key: tk.BooleanVar(value=(key in old if old else key in defaults)) for key in self.column_defs}
+
+    def _visible_columns(self):
+        return [key for key in self.column_defs if self.column_vars.get(key, tk.BooleanVar()).get()]
+
+    def _value(self, result, key):
+        e, rec = result.eiva_record, result.recorder_record
+        if key == "eiva_ffid": return e.original_ffid if e else ""
+        if key == "recorder_ffid": return rec.ffid if rec else ""
+        if key == "eiva_coord": return f"{e.easting_spark:.3f}, {e.northing_spark:.3f}" if e else ""
+        if key == "recorder_coord": return f"{rec.source_x:.3f}, {rec.source_y:.3f}" if rec else ""
+        if key == "distance": return f"{result.distance_m:.3f}" if result.distance_m is not None else ""
+        if key == "status": return result.status
+        if key == "diagnostic": return result.diagnostic
+        if key == "recorder_x": return f"{rec.source_x:.5f}" if rec else ""
+        if key == "recorder_y": return f"{rec.source_y:.5f}" if rec else ""
+        return e.original_values_by_column.get(key.split(":", 1)[1], "") if e else ""
+
+    def _populate_table(self):
+        columns = self._visible_columns(); self.tree.configure(columns=columns)
+        for key in columns:
+            self.tree.heading(key, text=self.column_defs[key]); self.tree.column(key, width=145, anchor="w")
+        for item in self.tree.get_children(): self.tree.delete(item)
+        for index, result in enumerate(self.results):
+            self.tree.insert("", "end", iid=str(index), values=[self._value(result, key) for key in columns])
+
+    def _columns_dialog(self):
+        if not self.results: return
+        window = tk.Toplevel(self); window.title("Columns"); window.transient(self); window.grab_set()
+        for row, key in enumerate(self.column_defs):
+            ttk.Checkbutton(window, text=self.column_defs[key], variable=self.column_vars[key]).grid(row=row, column=0, sticky="w", padx=10, pady=2)
+        ttk.Button(window, text="Apply", command=lambda: (self._populate_table(), window.destroy())).grid(row=len(self.column_defs), column=0, pady=8)
+
+    def _update_counters(self):
+        counts = {status: len(problem_result_indices(self.results, status)) for status in ("EIVA_ONLY", "RECORDER_INVALID", "REVIEW")}
+        self.matched_value.config(text=str(sum(r.status == "MATCHED" for r in self.results)))
+        for status in counts:
+            getattr(self, f"{status.lower()}_value").config(text=str(counts[status]))
+            getattr(self, f"{status.lower()}_position").config(text=f"{'1' if counts[status] else '0'} / {counts[status]}")
+        flagged = sum(counts.values()); events = anomaly_event_count(self.results); freq = anomaly_frequency_per_1000(self.results, len(self.eiva_records))
+        jumps = ffid_discontinuities(self.eiva_records)
+        jump_text = "none" if not jumps else ", ".join(f"{before}→{after}" for before, after in jumps)
+        self.metrics.config(text=f"Flagged records: {flagged}   Anomaly events: {events}   Anomaly frequency: {freq:.2f} / 1000 shots   FFID jumps: {jump_text}")
+        self.nav_positions = {status: problem_result_indices(self.results, status) for status in counts}; self.nav_current = {}
+
+    def _navigate(self, status, step):
+        index = next_cycle(self.nav_positions.get(status, []), self.nav_current.get(status), step)
+        if index is None: return
+        self.nav_current[status] = index; positions = self.nav_positions[status]
+        getattr(self, f"{status.lower()}_position").config(text=f"{positions.index(index)+1} / {len(positions)}")
+        self._select_result(index)
+
+    def _select_result(self, index):
+        iid = str(index); self.tree.selection_set(iid); self.tree.focus(iid); self.tree.see(iid); self._ensure_timeline_visible(index)
+
+    def _result_position(self, index):
+        result = self.results[index]
+        if result.eiva_record:
+            return next((i for i, e in enumerate(self.eiva_records) if e.source_line_number == result.eiva_record.source_line_number), 0)
+        for later in range(index + 1, len(self.results)):
+            if self.results[later].eiva_record: return self._result_position(later)
+        for earlier in range(index - 1, -1, -1):
+            if self.results[earlier].eiva_record: return self._result_position(earlier)
+        return 0
+
+    def _ensure_timeline_visible(self, result_index):
+        if not self.eiva_records: return
+        x = self._result_position(result_index) * self.TIMELINE_STEP
+        visible = max(1, self.timeline.winfo_width()); total = max(visible, len(self.eiva_records) * self.TIMELINE_STEP)
+        left = max(0, min(total - visible, x - visible // 2)); self.timeline.xview_moveto(left / total)
+        self._update_range_label()
+
+    def _table_selected(self, _event):
+        selection = self.tree.selection()
+        if selection: self._ensure_timeline_visible(int(selection[0]))
+
+    def _draw_timeline(self):
+        self.timeline.delete("all"); self._timeline_hits = []
+        if not self.eiva_records: self.range_label.config(text="Positions —"); return
+        total = max(self.timeline.winfo_width(), len(self.eiva_records) * self.TIMELINE_STEP); self.timeline.configure(scrollregion=(0, 0, total, 48))
+        eiva_position = {r.eiva_record.source_line_number: i for i, r in enumerate(self.results) if r.eiva_record}
+        priority = {"MATCHED": 0, "EIVA_ONLY": 1, "REVIEW": 2, "RECORDER_INVALID": 3}; colors = {"MATCHED": "#2e9d50", "EIVA_ONLY": "#d33", "REVIEW": "#f90", "RECORDER_INVALID": "#b65f00"}
+        by_pixel = {}
+        for result_index, result in enumerate(self.results):
+            position = self._result_position(result_index); x = position * self.TIMELINE_STEP + 1; current = by_pixel.get(x)
+            if current is None or priority[result.status] > priority[current[0]]: by_pixel[x] = (result.status, result_index)
+            if result.status in {"EIVA_ONLY", "REVIEW", "RECORDER_INVALID"}: self._timeline_hits.append((x, result_index))
+        for x, (status, result_index) in by_pixel.items():
+            self.timeline.create_rectangle(x, 8, x + 4, 38, fill=colors[status], outline=colors[status], tags=(f"result_{result_index}",))
+        self._update_range_label()
+
+    def _timeline_click(self, event):
+        x = self.timeline.canvasx(event.x); nearby = [(abs(x - marker), index) for marker, index in self._timeline_hits if abs(x - marker) <= self.TIMELINE_STEP * 2]
+        if nearby: self._select_result(min(nearby)[1])
+
+    def _update_range_label(self):
+        if not self.eiva_records: return
+        visible = max(1, self.timeline.winfo_width()); left = int(self.timeline.canvasx(0) / self.TIMELINE_STEP) + 1; count = max(1, visible // self.TIMELINE_STEP); right = min(len(self.eiva_records), left + count - 1)
+        self.range_label.config(text=f"Positions {left}–{right} of {len(self.eiva_records)}")
+
+    def _timeline_xscroll(self, *args):
+        self.timeline_scroll.set(*args)
+        self._update_range_label()
+
     def export(self):
-        if not self.results: return messagebox.showinfo('Export','Analyse files first.')
-        p=filedialog.asksaveasfilename(defaultextension='.csv',filetypes=[('CSV','*.csv')]);
-        if p: export_csv(p,self.results)
-if __name__ == '__main__': App().mainloop()
+        if not self.results: messagebox.showinfo("Export", "Analyse files first."); return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if path: export_csv(path, self.results)
+
+
+if __name__ == "__main__":
+    App().mainloop()

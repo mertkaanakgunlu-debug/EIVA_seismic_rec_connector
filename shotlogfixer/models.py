@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Any
 
 @dataclass
@@ -8,6 +8,7 @@ class EivaRecord:
     easting_spark: float
     northing_spark: float
     original_fields: list[str]
+    original_values_by_column: dict[str, str] = field(default_factory=dict)
 
 @dataclass
 class RecorderRecord:
@@ -24,4 +25,3 @@ class MatchResult:
     distance_m: Optional[float]
     status: str
     diagnostic: str
-
