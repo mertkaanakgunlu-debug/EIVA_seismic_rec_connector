@@ -1,6 +1,15 @@
 import { contextBridge, ipcRenderer } from "electron";
 
+const diagnosticsEnabled = process.argv.includes("--shotlogfixer-diagnostics") || process.argv.includes("--renderer-diagnostics");
+
 contextBridge.exposeInMainWorld("shotlogfixer", {
+  getRendererHeartbeat: () => ipcRenderer.invoke("get-renderer-heartbeat"),
+  ...(diagnosticsEnabled ? { diagnostics: {
+    isolation: process.argv.find((arg) => arg.startsWith("--isolation="))?.split("=")[1] || "full",
+    css: process.argv.find((arg) => arg.startsWith("--css="))?.split("=")[1] || "full",
+    themeStage: process.argv.find((arg) => arg.startsWith("--theme-stage="))?.split("=")[1] || "full",
+    report: (snapshot: unknown) => ipcRenderer.send("renderer-heartbeat", snapshot),
+  } } : {}),
   selectEivaFile: () => ipcRenderer.invoke("select-file", "eiva") as Promise<string | null>,
   selectRecorderFile: () => ipcRenderer.invoke("select-file", "recorder") as Promise<string | null>,
   analyseFiles: (eivaPath: string, recorderPath: string) => ipcRenderer.invoke("analyse-files", { eivaPath, recorderPath }),

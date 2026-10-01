@@ -49,6 +49,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 *::-webkit-scrollbar-thumb { background: var(--border-strong); border: 3px solid transparent; border-radius: 6px; background-clip: padding-box; }
 *::-webkit-scrollbar-thumb:hover { background: var(--muted); border-width: 2px; }
 
+/* Diagnostic mode deliberately removes the high-risk paint features so CSS can be binary-tested. */
+:root[data-diagnostics-css="minimal"] * { scrollbar-color: auto; transition: none !important; }
+:root[data-diagnostics-css="minimal"] *::-webkit-scrollbar,
+:root[data-diagnostics-css="minimal"] *::-webkit-scrollbar-track,
+:root[data-diagnostics-css="minimal"] *::-webkit-scrollbar-thumb { all: revert; }
+
 .app-shell { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
 .app-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 18px 28px 14px; border-bottom: 1px solid var(--border); }
 h1, h2, p { margin: 0; }

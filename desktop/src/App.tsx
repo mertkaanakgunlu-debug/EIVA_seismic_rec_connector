@@ -1,9 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from "react";
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { basename, formatCoordinate, nextCycle, resolveThemePreference, statusIndices, timelinePositionForRecord, timelineRecordIndexAtX } from "./lib/logic";
 import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, Status } from "./lib/types";
 import "./styles.css";
+import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
@@ -47,7 +46,9 @@ function StatusMark({ lifecycle }: { lifecycle: Lifecycle }) {
 }
 
 function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (value: ThemePreference) => void }) {
+  useRenderDiagnostics("ThemePicker");
   const [open, setOpen] = useState(false);
+  useEffect(() => { diagnosticPhase(`theme-picker-open:${open}`); }, [open]);
   const options: Array<[ThemePreference, string]> = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
   return <div className="theme-picker">
     <span>Theme</span>
@@ -79,6 +80,8 @@ function errorMessage(response: AnalysisResponse | ExportResponse): string {
 }
 
 export default function App() {
+  useRenderDiagnostics("App");
+  const isolation = diagnosticOptions?.isolation || "full";
   const [eivaPath, setEivaPath] = useState("");
   const [recorderPath, setRecorderPath] = useState("");
   const [analysis, setAnalysis] = useState<AnalysisSuccess | null>(null);
@@ -99,9 +102,16 @@ export default function App() {
 
   const theme = resolveThemePreference(themePreference, systemDark);
   useEffect(() => {
+    document.documentElement.dataset.diagnosticsCss = diagnosticOptions?.css || "full";
+    return () => { delete document.documentElement.dataset.diagnosticsCss; };
+  }, []);
+  useEffect(() => {
+    diagnosticPhase("theme-effect-start");
     markTiming("theme-change-start");
     document.documentElement.dataset.theme = theme;
+    diagnosticPhase("theme-dom-written");
     localStorage.setItem("shotlogfixer-theme", themePreference);
+    diagnosticPhase("theme-effect-complete");
     markTiming("theme-change-complete", "theme-change-start");
   }, [theme, themePreference]);
   useEffect(() => {
@@ -113,6 +123,16 @@ export default function App() {
   }, []);
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(""), 3600); return () => window.clearTimeout(timer); }, [toast]);
   useEffect(() => { if (analysis) markTiming("analysis-state-assigned"); }, [analysis]);
+  useEffect(() => {
+    if (!analysis) return;
+    diagnosticPhase(`analysis-react-commit:${analysis.records.length}-rows`);
+    requestAnimationFrame(() => requestAnimationFrame(() => diagnosticPhase("analysis-two-frames")));
+  }, [analysis]);
+  useEffect(() => {
+    if (!diagnosticsEnabled) return;
+    window.shotlogfixerTest = { setFiles: (eivaPath, recorderPath) => { setEivaPath(eivaPath); setRecorderPath(recorderPath); } };
+    return () => { delete window.shotlogfixerTest; };
+  }, []);
 
   const records = analysis?.records || [];
   const problemGroups = useMemo(() => ({
@@ -150,6 +170,7 @@ export default function App() {
   };
 
   const analyse = async () => {
+    diagnosticPhase("analyse-entered");
     markTiming("analyse-request-start");
     setError("");
     if (!eivaPath && !recorderPath) { setError("Select both an EIVA log and a recorder log before analysing."); setLifecycle("failed"); return; }
@@ -157,10 +178,13 @@ export default function App() {
     if (!recorderPath) { setError("Select a recorder log before analysing."); setLifecycle("failed"); return; }
     setAnalysis(null); setSelectedIndex(null); setLifecycle("running");
     try {
+      diagnosticPhase("analyse-ipc-invoke-start");
       const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath);
+      diagnosticPhase("analyse-ipc-promise-resolved");
       markTiming("python-response-received", "analyse-request-start");
+      diagnosticPhase(`analyse-response-known:${JSON.stringify(response).length}-bytes`);
       if (!response.ok) { setError(errorMessage(response)); setLifecycle("failed"); return; }
-      setAnalysis(response); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, RECORDER_INVALID: null, REVIEW: null }); setLifecycle("done");
+      setAnalysis(response); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, RECORDER_INVALID: null, REVIEW: null }); setLifecycle("done");
     } catch { setError("The Python engine could not be reached."); setLifecycle("failed"); }
   };
 
@@ -243,10 +267,12 @@ export default function App() {
   const timelineTotal = analysis?.summary.eiva_rows || records.length;
   useEffect(() => {
     const canvas = timelineCanvasRef.current;
-    if (!canvas) return;
+    if (!canvas || ["no-timeline", "no-visualizations", "header-only"].includes(isolation)) return;
+    diagnosticPhase("timeline-effect-start");
     const context = canvas.getContext("2d");
     if (!context) return;
     const styles = getComputedStyle(document.documentElement);
+    diagnosticPhase("timeline-style-read");
     const colors: Record<string, string> = { MATCHED: styles.getPropertyValue("--matched"), EIVA_ONLY: styles.getPropertyValue("--eiva-only"), REVIEW: styles.getPropertyValue("--review"), RECORDER_INVALID: styles.getPropertyValue("--invalid"), NO_SHOT: styles.getPropertyValue("--review") };
     context.clearRect(0, 0, timelineTrackWidth, 60);
     context.strokeStyle = styles.getPropertyValue("--border"); context.globalAlpha = 1; context.lineWidth = 1; context.beginPath(); context.moveTo(0, 30.5); context.lineTo(timelineTrackWidth, 30.5); context.stroke();
@@ -260,28 +286,31 @@ export default function App() {
     });
     context.globalAlpha = 1;
     markTiming("timeline-render-complete");
-  }, [records, selectedIndex, timelineTotal, timelineTrackWidth, theme]);
+    diagnosticPhase("timeline-effect-complete");
+  }, [records, selectedIndex, timelineTotal, timelineTrackWidth, theme, isolation]);
 
-  const columns = useMemo<ColumnDef<EngineRecord>[]>(() => visibleColumns.map((key) => {
+  const columns = useMemo(() => visibleColumns.map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
-    return { id: key, header: spec.label, accessorFn: (record) => getCellValue(record, key), cell: (info) => info.getValue() as string };
+    return { id: key, header: spec.label };
   }), [allColumns, visibleColumns]);
-  const table = useReactTable({ data: records, columns, getCoreRowModel: getCoreRowModel() });
-  const tableRows = table.getRowModel().rows;
-  const rowVirtualizer = useVirtualizer({
-    count: tableRows.length,
-    getScrollElement: () => tableViewportRef.current,
-    estimateSize: () => 31,
-    overscan: 8,
-    getItemKey: (index) => tableRows[index]?.id || index,
-  });
-  const virtualRows = rowVirtualizer.getVirtualItems();
+  const tableRecords = ["no-table", "no-visualizations", "header-only"].includes(isolation) ? [] : records;
+  const tableRows = tableRecords.map((original, index) => ({ id: String(index), index, original }));
+  // The previous TanStack virtualizer continuously invalidated its ResizeObserver on
+  // Windows Chromium, producing an unbounded App render loop even with zero rows.
+  // 2,816 rows are small enough for a stable native table and keep correctness ahead
+  // of an optional rendering optimization.
+  const virtualRows = tableRows.map((_row, index) => ({ index, start: index * 31, size: 31 }));
+  const rowVirtualizer = {
+    getTotalSize: () => tableRows.length * 31,
+    scrollToIndex: (index: number, _options?: unknown) => { if (tableViewportRef.current) tableViewportRef.current.scrollTop = index * 31; },
+    measureElement: undefined,
+  };
   useLayoutEffect(() => { if (analysis) markTiming("table-render-complete"); }, [analysis, virtualRows.length, visibleColumns]);
   const visibleStart = timelineTotal ? Math.min(timelineTotal, Math.floor((timelineLeft / timelineTrackWidth) * timelineTotal) + 1) : 0;
   const visibleCount = timelineRef.current ? Math.ceil((timelineRef.current.clientWidth / timelineTrackWidth) * timelineTotal) : 0;
   const visibleEnd = timelineTotal ? Math.min(timelineTotal, visibleStart + Math.max(1, visibleCount) - 1) : 0;
 
-  return <div className="app-shell">
+  return <div className="app-shell" data-diagnostics-isolation={isolation}>
     <header className="app-header">
       <div><h1>ShotLogFixer</h1><p>Seismic acquisition QC</p></div>
       <div className="header-actions"><StatusMark lifecycle={lifecycle} /><ThemePicker value={themePreference} onChange={setThemePreference} /></div>
@@ -324,7 +353,7 @@ export default function App() {
 
       <section className="table-section" aria-label="QC detail">
         <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap"><button className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <div className="columns-popover"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div><button className="button primary compact-button" onClick={() => setColumnsOpen(false)}>Apply</button></div>}</div></div>
-        <div className="table-viewport" ref={tableViewportRef}><table><thead>{table.getHeaderGroups().map((headerGroup) => <tr key={headerGroup.id}>{headerGroup.headers.map((header) => <th key={header.id}>{flexRender(header.column.columnDef.header, header.getContext())}</th>)}</tr>)}</thead><tbody style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>{virtualRows.map((virtualRow) => { const row = tableRows[virtualRow.index]; return <tr key={row.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="virtual-row" style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }} data-selected={selectedIndex === row.index} data-status={row.original.status} onClick={() => selectRecord(row.index)}>{row.getVisibleCells().map((cell) => <td key={cell.id} className={cell.column.id === "status" ? `status-cell status-${row.original.status.toLowerCase()}` : undefined}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>; })}</tbody></table>{!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}</div>
+        <div className="table-viewport" ref={tableViewportRef}><table><thead><tr>{columns.map((column) => <th key={column.id}>{column.header}</th>)}</tr></thead><tbody style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>{virtualRows.map((virtualRow) => { const row = tableRows[virtualRow.index]; return <tr key={row.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="virtual-row" style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }} data-selected={selectedIndex === row.index} data-status={row.original.status} onClick={() => selectRecord(row.index)}>{columns.map((column) => <td key={column.id} className={column.id === "status" ? `status-cell status-${row.original.status.toLowerCase()}` : undefined}>{getCellValue(row.original, column.id)}</td>)}</tr>; })}</tbody></table>{!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}</div>
       </section>
     </main>
     <footer className="app-footer"><span>{analysis ? `${records.length.toLocaleString()} result rows` : "Ready for an offline analysis"}</span><div className="footer-actions"><button className="button secondary compact-button" onClick={exportQc} disabled={!analysis}><Icon name="download" />Export QC CSV</button><button className="button secondary compact-button" onClick={saveFixedEiva} disabled={!correctionReady}>Save Fixed EIVA</button><button className="button primary compact-button" onClick={saveFixedPair} disabled={!correctionReady}>Save Fixed Pair</button></div></footer>
