@@ -24,10 +24,12 @@ class App(tk.Tk):
         for r in self.results: self.tree.insert('', 'end', values=(r.eiva_record.original_ffid if r.eiva_record else '',r.recorder_record.ffid if r.recorder_record else '',f'{r.distance_m:.3f}' if r.distance_m is not None else '',r.status,r.diagnostic))
         counts={s:sum(r.status==s for r in self.results) for s in ('MATCHED','EIVA_ONLY','RECORDER_INVALID','REVIEW')}; self.summary.config(text=f"EIVA rows: {sum(bool(r.eiva_record) for r in self.results)}  Recorder rows: {sum(bool(r.recorder_record) for r in self.results)}  Matched: {counts['MATCHED']}  EIVA-only: {counts['EIVA_ONLY']}  Invalid: {counts['RECORDER_INVALID']}  Review: {counts['REVIEW']}"); self._draw()
     def _draw(self):
-        self.canvas.delete('all'); ordered=sorted((r for r in self.results if r.eiva_record), key=lambda r: r.eiva_record.source_line_number); n=max(1,len(ordered)); w=max(self.canvas.winfo_width(),100); seen=0
-        for r in ordered:
-            if not r.eiva_record: continue
-            x=5+(w-10)*seen/max(1,n-1); color={'MATCHED':'#2e9d50','EIVA_ONLY':'#d33','REVIEW':'#f90','RECORDER_INVALID':'#f90'}.get(r.status,'#999'); self.canvas.create_rectangle(x,12,x+2,35,fill=color,outline=color); seen+=1
+        self.canvas.delete('all'); ordered=sorted((r for r in self.results if r.eiva_record), key=lambda r: r.eiva_record.source_line_number); n=max(1,len(ordered)); w=max(self.canvas.winfo_width(),100); bins={}; priority={'MATCHED':0,'EIVA_ONLY':1,'REVIEW':2,'RECORDER_INVALID':2}
+        for index, r in enumerate(ordered):
+            pixel=round(5+(w-10)*index/max(1,n-1)); current=bins.get(pixel)
+            if current is None or priority.get(r.status,0)>priority.get(current,0): bins[pixel]=r.status
+        for x, status in bins.items():
+            color={'MATCHED':'#2e9d50','EIVA_ONLY':'#d33','REVIEW':'#f90','RECORDER_INVALID':'#f90'}.get(status,'#999'); self.canvas.create_rectangle(x,12,x+2,35,fill=color,outline=color)
     def export(self):
         if not self.results: return messagebox.showinfo('Export','Analyse files first.')
         p=filedialog.asksaveasfilename(defaultextension='.csv',filetypes=[('CSV','*.csv')]);

@@ -1,4 +1,5 @@
 import csv
+import math
 from pathlib import Path
 from .models import EivaRecord, RecorderRecord
 from config import INVALID_COORDINATE
@@ -33,14 +34,19 @@ def parse_eiva(path: str | Path) -> list[EivaRecord]:
 
 def parse_recorder(path: str | Path) -> list[RecorderRecord]:
     out = []
+    header_seen = False
     for line, raw in enumerate(_read(Path(path)).splitlines(), 1):
         if not raw.strip(): continue
         parts = raw.split()
         if len(parts) < 3: raise ValueError(f"Malformed recorder row at line {line}")
-        if line == 1 and parts[0].strip().lower() == "ffid" and parts[1].strip().lower() == "sou_x":
+        if (not header_seen and parts[0].strip().lower() == "ffid"
+                and parts[1].strip().lower() == "sou_x"
+                and parts[2].strip().lower() == "sou_y"):
+            header_seen = True
             continue
         try: x, y = float(parts[1]), float(parts[2])
         except ValueError as exc: raise ValueError(f"Malformed recorder row at line {line}: {exc}") from exc
-        valid = not (x == INVALID_COORDINATE and y == INVALID_COORDINATE)
+        valid = (math.isfinite(x) and math.isfinite(y)
+                 and x != INVALID_COORDINATE and y != INVALID_COORDINATE)
         out.append(RecorderRecord(line, parts[0], x, y, valid))
     return out
