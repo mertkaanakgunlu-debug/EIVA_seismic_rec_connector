@@ -1,0 +1,30 @@
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging/build output
+build/
+dist/
+*.spec
+
+# Generated QC exports
+*_qc.csv
+qc_output*.csv
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+
