@@ -39,6 +39,8 @@ class CorrectionBundle:
     recorder_encoding: str = "utf-8"
     parameters: AnalysisParameters = field(default_factory=lambda: AnalysisParameters(2.0))
     recorder_gaps: list[RecorderGapEvent] = field(default_factory=list)
+    eiva_profile: object | None = None
+    recorder_profile: object | None = None
 
 
 def sha256_file(path: str | Path) -> str:
@@ -215,16 +217,64 @@ def build_candidates(eiva_text, recorder_text, eiva, recorder, plan):
     return assemble(eiva_text, eiva, eiva_replacements), assemble(recorder_text, recorder, recorder_replacements)
 
 
+def build_profile_candidates(eiva_text, recorder_text, eiva, recorder, plan, eiva_profile, recorder_profile):
+    """Serialize profile-driven rows while retaining headers, delimiters and unrelated cells."""
+    from .table_parser import replace_fields, parse_table
+    eiva_table, recorder_table = parse_table(eiva_text, eiva_profile), parse_table(recorder_text, recorder_profile)
+    eiva_repl, recorder_repl = {}, {}
+    eiva_ix, rec_ix = eiva_profile.mapping, recorder_profile.mapping
+    for action in plan.actions:
+        if action.eiva_source_index is None: continue
+        erow = eiva[action.eiva_source_index]
+        if action.action_type == "KEEP_AND_RENUMBER":
+            eiva_repl[erow.source_line_number] = replace_fields(erow.original_line, {
+                eiva_ix["FFID"]: action.target_ffid,
+                eiva_ix["EIVA_EASTING"]: f"{erow.easting_spark:.2f}",
+                eiva_ix["EIVA_NORTHING"]: f"{erow.northing_spark:.2f}"}, eiva_profile.structure)
+            rec = recorder[action.recorder_source_index]
+            recorder_repl[rec.source_line_number] = replace_fields(rec.original_line, {
+                rec_ix["FFID"]: rec.ffid, rec_ix["RECORDER_X"]: f"{rec.source_x:.2f}",
+                rec_ix["RECORDER_Y"]: f"{rec.source_y:.2f}"}, recorder_profile.structure)
+        else:
+            eiva_repl[erow.source_line_number] = ""
+            if action.action_type == "DROP_NO_SHOT":
+                recorder_repl[recorder[action.recorder_source_index].source_line_number] = ""
+    def assemble(text, records, replacements):
+        lines = text.splitlines(keepends=True)
+        by_line = {r.source_line_number: r for r in records}
+        out, i = [], 1
+        while i <= len(lines):
+            row = by_line.get(i)
+            if row:
+                replacement = replacements.get(i, row.original_line)
+                if replacement and not replacement.endswith(("\n", "\r")):
+                    replacement += text.splitlines(keepends=True)[i-1][-1:] if text.splitlines(keepends=True)[i-1].endswith(("\n", "\r")) else ""
+                out.append(replacement)
+                i = getattr(row, "source_end_line_number", None) or i
+            else:
+                out.append(lines[i-1])
+            i += 1
+        return ''.join(out)
+    return assemble(eiva_text, eiva, eiva_repl), assemble(recorder_text, recorder, recorder_repl)
+
+
 def prepare_correction(eiva_path: str | Path, recorder_path: str | Path,
-                       parameters: AnalysisParameters | None = None) -> CorrectionBundle:
+                       parameters: AnalysisParameters | None = None, eiva_profile=None, recorder_profile=None) -> CorrectionBundle:
     legacy_direct_call = parameters is None
     parameters = parameters or AnalysisParameters(2.0)
     eiva_path, recorder_path = Path(eiva_path).resolve(), Path(recorder_path).resolve()
     eiva_bytes, recorder_bytes = eiva_path.read_bytes(), recorder_path.read_bytes()
     hashes = {"eiva": hashlib.sha256(eiva_bytes).hexdigest(), "recorder": hashlib.sha256(recorder_bytes).hexdigest()}
-    eiva_text, eencoding = decode_source(eiva_bytes)
-    recorder_text, rencoding = decode_source(recorder_bytes)
-    eiva, recorder = parse_eiva_text(eiva_text), parse_recorder_text(recorder_text)
+    from .source_reader import decode_source as decode
+    eiva_text, eencoding = decode(eiva_bytes, eiva_profile.structure.encoding if eiva_profile else "AUTO")
+    recorder_text, rencoding = decode(recorder_bytes, recorder_profile.structure.encoding if recorder_profile else "AUTO")
+    if (eiva_profile is None) != (recorder_profile is None): raise ValueError("Provide both input format profiles")
+    if eiva_profile:
+        from .profile_validation import require_valid
+        from .table_parser import parse_table
+        require_valid(eiva_profile, parse_table(eiva_text,eiva_profile))
+        require_valid(recorder_profile, parse_table(recorder_text,recorder_profile))
+    eiva, recorder = parse_eiva_text(eiva_text, eiva_profile), parse_recorder_text(recorder_text, recorder_profile)
     raw_results = match_records(eiva, recorder, parameters)
     # Resolve the existing bracketed NO_SHOT semantics before gap attribution;
     # the geometry analyzer must see those explicit events between anchors.
@@ -244,9 +294,13 @@ def prepare_correction(eiva_path: str | Path, recorder_path: str | Path,
                               eiva_path=eiva_path, recorder_path=recorder_path, eiva_encoding=eencoding, recorder_encoding=rencoding)
     bundle.parameters = parameters
     bundle.recorder_gaps = recorder_gaps
+    bundle.eiva_profile, bundle.recorder_profile = eiva_profile, recorder_profile
     if plan.safe_to_build:
-        bundle.eiva_text, bundle.recorder_text = build_candidates(eiva_text, recorder_text, eiva, recorder, plan)
-        bundle.validation = validate_candidates(eiva, recorder, plan, bundle.eiva_text, bundle.recorder_text, results, parameters, recorder_gaps)
+        if eiva_profile is None and recorder_profile is None:
+            bundle.eiva_text, bundle.recorder_text = build_candidates(eiva_text, recorder_text, eiva, recorder, plan)
+        else:
+            bundle.eiva_text, bundle.recorder_text = build_profile_candidates(eiva_text, recorder_text, eiva, recorder, plan, eiva_profile, recorder_profile)
+        bundle.validation = validate_candidates(eiva, recorder, plan, bundle.eiva_text, bundle.recorder_text, results, parameters, recorder_gaps, eiva_profile, recorder_profile)
     else:
         classes = [classify_recorder_row(row) for row in recorder]
         bundle.validation = ValidationResult(False, len(eiva), len(recorder), classes.count("VALID"),
@@ -272,7 +326,7 @@ def _validate_for_write(bundle):
     _verify_raw_hashes(bundle)
     validation = validate_candidates(bundle.eiva_records, bundle.recorder_records, bundle.plan,
                                      bundle.eiva_text, bundle.recorder_text, bundle.results,
-                                     bundle.parameters, bundle.recorder_gaps)
+                                     bundle.parameters, bundle.recorder_gaps, bundle.eiva_profile, bundle.recorder_profile)
     if not validation.passed:
         raise CorrectionNotValidatedError('; '.join(validation.errors))
 

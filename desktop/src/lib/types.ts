@@ -108,6 +108,18 @@ export interface AnalysisSuccess {
   input_hashes?: { eiva: string; recorder: string };
   parameters: { shot_interval_m: number; match_tolerance_m: number; recorder_gap_threshold_m: number };
   recorder_gaps: RecorderGapEvent[];
+  input_formats?: { eiva: FormatProfileSummary; recorder: FormatProfileSummary };
+}
+
+export interface FormatProfileSummary {
+  id: string;
+  name: string;
+  confidence: string;
+  delimiter: string;
+  header: string;
+  profile_hash: string;
+  column_mapping: Record<string, number>;
+  [key: string]: unknown;
 }
 
 export interface AnalysisFailure {

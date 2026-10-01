@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import { basename, columnAlignment, ffidJumpTargets, getCellValue, nextCycle, resolveThemePreference, statusIndices, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX } from "./lib/logic";
-import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, RecorderGapEvent } from "./lib/types";
+import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, RecorderGapEvent, FormatProfileSummary } from "./lib/types";
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
 import { formatDiagnostic, formatGapClassification, formatRecordStatus } from "./lib/presentation";
@@ -47,6 +47,85 @@ function StatusMark({ lifecycle }: { lifecycle: Lifecycle }) {
   return <span className={`status-mark status-mark-${lifecycle}`} aria-live="polite"><span className="status-mark-dot" />{labels[lifecycle]}</span>;
 }
 
+function FormatStatus({ kind, state, onConfigure }: { kind: "EIVA" | "RECORDER"; state: any; onConfigure: () => void }) {
+  const profile = state?.profile as FormatProfileSummary | undefined;
+  const ready = Boolean(profile && state?.validation?.valid && profile.confidence !== "Unresolved");
+  const label = profile ? (ready ? "Ready" : profile.confidence === "Review recommended" ? "Needs review" : "Not ready") : state?.error ? "Not ready" : "Inspecting…";
+  return <div className="format-status" aria-live="polite"><span className="format-role">Format</span><strong>{profile?.name || (kind === "EIVA" ? "EIVA format" : "Recorder format")}</strong><span className={`format-state ${ready ? "format-ready" : "format-review"}`}>{ready ? "✓" : "!"} {label}</span><button className="button secondary compact-button" onClick={onConfigure} disabled={!profile}>Configure</button></div>;
+}
+
+type PreviewMode = "first" | "random" | "last" | "raw";
+
+function FormatDialog({ kind, filePath, state, onCancel, onUse, onSave }: { kind: "EIVA" | "RECORDER"; filePath: string; state: any; onCancel: () => void; onUse: (profile: any) => void; onSave: (profile: any) => void }) {
+  const initial = state?.profile;
+  const [working, setWorking] = useState<any>(() => initial ? JSON.parse(JSON.stringify(initial)) : null);
+  const [preview, setPreview] = useState<any>(state?.preview || null);
+  const [columns, setColumns] = useState<string[]>(state?.columns || []);
+  const [validation, setValidation] = useState<any>(state?.validation || null);
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("first");
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onCancel(); };
+    document.addEventListener("keydown", onKey);
+    dialogRef.current?.focus();
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  useEffect(() => {
+    if (!working || !filePath) return;
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      const response = await window.shotlogfixer.previewFormat(filePath, kind, working);
+      if (!active) return;
+      if (response.ok) { setPreview(response.preview); setColumns(response.columns || []); setValidation(response.validation); }
+      else setValidation({ valid: false, usable_rows: 0, data_rows: 0, errors: [response.error?.detail || response.error?.message || "Format not ready"] });
+    }, 120);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [filePath, kind, working]);
+
+  useEffect(() => {
+    let active = true;
+    void window.shotlogfixer.listFormatProfiles().then((response) => {
+      if (active && response.ok) setProfiles((response.profiles || []).filter((profile) => profile.input_type === kind));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [kind]);
+
+  if (!working) return null;
+  const structure = working.structure || {};
+  const roleNames = kind === "EIVA" ? [["FFID", "FFID"], ["EIVA_EASTING", "EIVA Easting"], ["EIVA_NORTHING", "EIVA Northing"]] : [["FFID", "FFID"], ["RECORDER_X", "Recorder X"], ["RECORDER_Y", "Recorder Y"]];
+  const updateStructure = (key: string, value: unknown) => setWorking((current: any) => ({ ...current, [key === "header_mode" ? "header" : key]: value, structure: { ...current.structure, [key]: value } }));
+  const updateMapping = (role: string, value: string) => setWorking((current: any) => { const mapping = { ...current.column_mapping }; if (value === "") delete mapping[role]; else mapping[role] = Number(value); return { ...current, column_mapping: mapping }; });
+  const rows = preview?.[previewMode === "raw" ? "first" : previewMode] || [];
+  const sourceColumns = columns.length ? columns : Object.keys(working.column_mapping || {}).map((_, index) => `Column ${index + 1}`);
+  const usable = validation?.usable_rows ?? 0;
+  const total = validation?.data_rows ?? 0;
+  const valid = Boolean(validation?.valid && roleNames.every(([role]) => Number.isInteger(working.column_mapping?.[role])));
+  return <div className="format-dialog" role="dialog" aria-modal="true" aria-labelledby="format-dialog-title"><div className="format-dialog-inner" ref={dialogRef} tabIndex={-1}>
+    <div className="format-dialog-header"><div><h2 id="format-dialog-title">Configure {kind === "EIVA" ? "EIVA" : "Recorder"} Format</h2><p className="dialog-file" title={filePath}>{basename(filePath)}</p></div><button className="icon-button" onClick={onCancel} aria-label="Cancel">×</button></div>
+    <div className="format-config-grid"><label>Profile<select value={working.id || ""} onChange={(event) => { const selected = profiles.find((profile) => profile.id === event.target.value); if (selected) setWorking(JSON.parse(JSON.stringify(selected))); }}><option value="">Detected format</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.source === "BUILTIN" ? " (built-in)" : ""}</option>)}</select></label><label>Encoding<select value={structure.encoding || "AUTO"} onChange={(event) => updateStructure("encoding", event.target.value)}><option value="AUTO">Auto</option><option value="utf-8">UTF-8</option><option value="utf-8-sig">UTF-8 BOM</option><option value="cp1252">CP1252</option><option value="latin-1">Latin-1</option></select></label></div>
+    <fieldset><legend>File structure</legend><div className="choice-row"><label><input type="radio" checked={working.source !== "CUSTOM"} onChange={() => setWorking((current: any) => ({ ...current, source: "DETECTED" }))} /> Auto detect</label><label><input type="radio" checked={working.source === "CUSTOM"} onChange={() => setWorking((current: any) => ({ ...current, source: "CUSTOM" }))} /> Custom</label></div><div className="format-config-grid"><label>Delimiter<select value={structure.delimiter || "comma"} onChange={(event) => updateStructure("delimiter", event.target.value)}><option value="comma">Comma (,)</option><option value="tab">Tab</option><option value="whitespace">Whitespace</option><option value="semicolon">Semicolon (;)</option><option value="pipe">Pipe (|)</option></select></label><label>Header<select value={structure.header_mode || "ABSENT"} onChange={(event) => updateStructure("header_mode", event.target.value)}><option value="ABSENT">No header</option><option value="PRESENT">First row contains names</option></select></label><label>Skip rows<input type="number" min="0" value={structure.skip_rows ?? 0} onChange={(event) => updateStructure("skip_rows", Math.max(0, Number(event.target.value) || 0))} /></label><label className="checkbox-label"><input type="checkbox" checked={structure.trim_whitespace !== false} onChange={(event) => updateStructure("trim_whitespace", event.target.checked)} /> Trim whitespace</label></div></fieldset>
+    <fieldset><legend>Field mapping</legend><div className="mapping-grid">{roleNames.map(([role, label]) => <label key={role}>{label}<select value={String(working.column_mapping?.[role] ?? "")} onChange={(event) => updateMapping(role, event.target.value)}><option value="">Unmapped</option>{sourceColumns.map((column, index) => <option key={`${role}-${index}`} value={index}>{column || `Column ${index + 1}`}</option>)}</select></label>)}</div></fieldset>
+    <section className="preview-panel"><div className="preview-toolbar"><div className="preview-tabs"><button className={previewMode !== "raw" ? "active" : ""} onClick={() => setPreviewMode("first")}>Parsed</button><button className={previewMode === "raw" ? "active" : ""} onClick={() => setPreviewMode("raw")}>Raw Text</button></div><label>Preview<select value={previewMode === "raw" ? "first" : previewMode} onChange={(event) => setPreviewMode(event.target.value as PreviewMode)}><option value="first">First 20</option><option value="random">Random 20</option><option value="last">Last 20</option></select></label></div>{previewMode === "raw" ? <pre className="raw-preview raw-preview-main">{rows.map((row: any) => row.raw).join("")}</pre> : <div className="preview-table-wrap"><table className="preview-table"><thead><tr><th>Row</th>{sourceColumns.map((column, index) => <th key={index}>{column || `Column ${index + 1}`}</th>)}</tr></thead><tbody>{rows.map((row: any) => <tr key={row.line}><td>{row.line}</td>{row.cells.map((cell: string, index: number) => <td key={index}>{cell}</td>)}</tr>)}</tbody></table></div>}</section>
+    <div className={`format-validation ${valid ? "is-valid" : "is-invalid"}`}><strong>{valid ? "✓ Format valid" : "✕ Format not ready"}</strong><span>{usable.toLocaleString()} data rows · {usable.toLocaleString()} usable · {Math.max(0, total - usable).toLocaleString()} malformed</span>{!valid && validation?.errors?.[0] && <small>{validation.errors[0]}</small>}</div>
+    <div className="format-dialog-actions"><button className="button secondary" onClick={() => onSave(working)}>Save as Profile</button><button className="button secondary" onClick={onCancel}>Cancel</button><button className="button primary" disabled={!valid} onClick={() => onUse({ ...working, confidence: valid ? "High confidence" : working.confidence, detection_metadata: { ...(working.detection_metadata || {}), confirmed: true } })}>Use Format</button></div>
+  </div></div>;
+}
+
+function CorrectionDetails({ reasons, onClose }: { reasons: string[]; onClose: () => void }) {
+  const categories = useMemo(() => {
+    const groups = new Map<string, string[]>();
+    for (const reason of reasons) {
+      const category = reason.startsWith("Unresolved REVIEW") ? "Unresolved review" : reason.startsWith("Recorder") || reason.includes("NO_SHOT") ? "Recorder or NO_SHOT review" : reason.startsWith("Ambiguous") ? "Ambiguous mapping" : "Other validation block";
+      groups.set(category, [...(groups.get(category) || []), reason]);
+    }
+    return [...groups.entries()];
+  }, [reasons]);
+  return <div className="details-drawer" role="dialog" aria-modal="true" aria-label="Correction details"><div className="details-inner"><div className="format-dialog-header"><h2>Correction blocked</h2><button className="icon-button" onClick={onClose} aria-label="Close details">×</button></div><p className="dialog-file">Review the grouped conditions before saving a fixed file.</p><div className="reason-list">{categories.map(([category, values]) => <div className="reason-row" key={category}><strong>{category}</strong><span>{values.length.toLocaleString()}</span><small>{values.slice(0, 3).map((value) => formatDiagnostic(value)).join(" · ")}{values.length > 3 ? " · …" : ""}</small></div>)}</div><button className="button primary" onClick={onClose}>Close</button></div></div>;
+}
+
 function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (value: ThemePreference) => void }) {
   useRenderDiagnostics("ThemePicker");
   const [open, setOpen] = useState(false);
@@ -72,6 +151,10 @@ export default function App() {
   const isolation = diagnosticOptions?.isolation || "full";
   const [eivaPath, setEivaPath] = useState("");
   const [recorderPath, setRecorderPath] = useState("");
+  const [formatStates, setFormatStates] = useState<{ eiva: any; recorder: any }>({ eiva: null, recorder: null });
+  const [formatOverrides, setFormatOverrides] = useState<{ eiva: any; recorder: any }>({ eiva: null, recorder: null });
+  const [formatDetails, setFormatDetails] = useState<"eiva" | "recorder" | null>(null);
+  const [correctionDetailsOpen, setCorrectionDetailsOpen] = useState(false);
   const [shotIntervalText, setShotIntervalText] = useState("3.125");
   const [analysis, setAnalysis] = useState<AnalysisSuccess | null>(null);
   const [lifecycle, setLifecycle] = useState<Lifecycle>("idle");
@@ -148,6 +231,21 @@ export default function App() {
   const shotInterval = Number(shotIntervalText.trim().replace(",", "."));
   const validShotInterval = Number.isFinite(shotInterval) && shotInterval > 0;
   const analysisStale = Boolean(analysis && (!validShotInterval || analysis.parameters.shot_interval_m !== shotInterval));
+  const profileStale = Boolean(analysis && ((formatStates.eiva?.profile?.profile_hash && analysis.input_formats?.eiva?.profile_hash !== formatStates.eiva.profile.profile_hash) || (formatStates.recorder?.profile?.profile_hash && analysis.input_formats?.recorder?.profile_hash !== formatStates.recorder.profile.profile_hash)));
+  const formatBlocked = Boolean(formatStates.eiva?.profile?.confidence === "Unresolved" || formatStates.recorder?.profile?.confidence === "Unresolved" || formatStates.eiva?.validation?.valid === false || formatStates.recorder?.validation?.valid === false);
+  const formatNeedsReview = Boolean(!formatOverrides.eiva && formatStates.eiva?.profile?.confidence === "Review recommended" || !formatOverrides.recorder && formatStates.recorder?.profile?.confidence === "Review recommended");
+  useEffect(() => {
+    let cancelled = false;
+    const inspect = async (path: string, inputType: "EIVA" | "RECORDER", key: "eiva" | "recorder") => {
+      if (!path) { setFormatStates((current) => ({ ...current, [key]: null })); return; }
+      try {
+        const response = await window.shotlogfixer.inspectFormat(path, inputType);
+        if (!cancelled) setFormatStates((current) => ({ ...current, [key]: response.ok ? response : { error: response.error?.detail || response.error?.message || "Format detection failed" } }));
+      } catch { if (!cancelled) setFormatStates((current) => ({ ...current, [key]: { error: "Format detection failed" } })); }
+    };
+    void inspect(eivaPath, "EIVA", "eiva"); void inspect(recorderPath, "RECORDER", "recorder");
+    return () => { cancelled = true; };
+  }, [eivaPath, recorderPath]);
 
   const focusRecord = (index: number) => {
     if (!records[index]) return;
@@ -212,7 +310,7 @@ export default function App() {
   const chooseFile = async (kind: "eiva" | "recorder") => {
     try {
       const selected = kind === "eiva" ? await window.shotlogfixer.selectEivaFile() : await window.shotlogfixer.selectRecorderFile();
-      if (selected) kind === "eiva" ? setEivaPath(selected) : setRecorderPath(selected);
+      if (selected) { if (kind === "eiva") { setEivaPath(selected); setFormatOverrides((current) => ({ ...current, eiva: null })); } else { setRecorderPath(selected); setFormatOverrides((current) => ({ ...current, recorder: null })); } }
     } catch { setError("The file picker could not be opened."); setLifecycle("failed"); }
   };
 
@@ -221,39 +319,41 @@ export default function App() {
     markTiming("analyse-request-start");
     setError("");
     if (!validShotInterval) { setError("Enter a finite positive Shot Interval before analysing."); setLifecycle("failed"); return; }
+    if (formatBlocked || formatNeedsReview) { setError(formatBlocked ? "Format not ready — configure the input mapping before analysing." : "Format needs review — open Configure and confirm the interpretation before analysing."); setLifecycle("failed"); return; }
     if (!eivaPath && !recorderPath) { setError("Select both an EIVA log and a recorder log before analysing."); setLifecycle("failed"); return; }
     if (!eivaPath) { setError("Select an EIVA log before analysing."); setLifecycle("failed"); return; }
     if (!recorderPath) { setError("Select a recorder log before analysing."); setLifecycle("failed"); return; }
     setAnalysis(null); setSelectedIndex(null); setLifecycle("running");
     try {
       diagnosticPhase("analyse-ipc-invoke-start");
-      const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath, shotInterval);
+      const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath, shotInterval, formatOverrides.eiva, formatOverrides.recorder);
       diagnosticPhase("analyse-ipc-promise-resolved");
       markTiming("python-response-received", "analyse-request-start");
       if (diagnosticsEnabled) diagnosticPhase(`analyse-response-known:${JSON.stringify(response).length}-bytes`);
       if (!response.ok) { setError(errorMessage(response)); setLifecycle("failed"); return; }
-      setAnalysis(response); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null }); setJumpCurrent(null); setGapCurrent(null); setLifecycle("done");
+      setAnalysis(response); if (response.input_formats) setFormatStates({ eiva: { ok: true, profile: response.input_formats.eiva, validation: { valid: true, usable_rows: response.summary.eiva_rows, data_rows: response.summary.eiva_rows } }, recorder: { ok: true, profile: response.input_formats.recorder, validation: { valid: true, usable_rows: response.summary.recorder_rows, data_rows: response.summary.recorder_rows } } }); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null }); setJumpCurrent(null); setGapCurrent(null); setLifecycle("done");
     } catch { setError("The Python engine could not be reached."); setLifecycle("failed"); }
   };
 
   const exportQc = async () => {
-    if (!analysis || analysisStale) { setError("Analysis settings changed — re-analyse before exporting QC."); return; }
+    if (!analysis || analysisStale || profileStale) { setError("Analysis settings changed — re-analyse before exporting QC."); return; }
     try {
       const outputPath = await window.shotlogfixer.selectQcExportPath(eivaPath);
       if (!outputPath) return;
-      const response = await window.shotlogfixer.exportQc(eivaPath, recorderPath, outputPath, shotInterval);
+      const response = await window.shotlogfixer.exportQc(eivaPath, recorderPath, outputPath, shotInterval, analysis.input_hashes, analysis.input_formats?.eiva, analysis.input_formats?.recorder);
       if (!response.ok) { setError(errorMessage(response)); return; }
       setToast("QC TXT exported successfully");
     } catch { setError("The QC TXT could not be exported."); }
   };
 
-  const correctionReady = Boolean(analysis && !analysisStale && analysis.correction.safe && analysis.validation.passed);
+  const correctionReady = Boolean(analysis && !analysisStale && !profileStale && analysis.correction.safe && analysis.validation.passed);
+  const correctionReasons = analysis ? (analysis.correction.blocking_reasons.length ? analysis.correction.blocking_reasons : analysis.validation.errors) : [];
   const saveFixedEiva = async () => {
     if (!analysis || !correctionReady) return;
     try {
       const outputPath = await window.shotlogfixer.selectFixedEivaPath(eivaPath);
       if (!outputPath) return;
-      const response = await window.shotlogfixer.saveFixedEiva(eivaPath, recorderPath, outputPath, shotInterval);
+      const response = await window.shotlogfixer.saveFixedEiva(eivaPath, recorderPath, outputPath, shotInterval, analysis.input_hashes, analysis.input_formats?.eiva, analysis.input_formats?.recorder);
       if (!response.ok) { setError(errorMessage(response)); return; }
       setToast("Fixed EIVA saved successfully");
     } catch { setError("The fixed EIVA file could not be saved."); }
@@ -264,7 +364,7 @@ export default function App() {
     try {
       const outputs = await window.shotlogfixer.selectFixedPairPath(eivaPath, recorderPath);
       if (!outputs) return;
-      const response = await window.shotlogfixer.saveFixedPair(eivaPath, recorderPath, outputs.eivaPath, outputs.recorderPath, shotInterval);
+      const response = await window.shotlogfixer.saveFixedPair(eivaPath, recorderPath, outputs.eivaPath, outputs.recorderPath, shotInterval, analysis.input_hashes, analysis.input_formats?.eiva, analysis.input_formats?.recorder);
       if (!response.ok) { setError(errorMessage(response)); return; }
       setToast("Fixed pair created; original files unchanged");
     } catch { setError("The fixed pair could not be saved."); }
@@ -395,11 +495,13 @@ export default function App() {
       <section className="input-section" aria-label="Input files">
         <div className="file-row"><label htmlFor="eiva-path">EIVA Log</label><input id="eiva-path" value={eivaPath ? basename(eivaPath) : "No file selected"} readOnly title={eivaPath} className={!eivaPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("eiva")}>Browse</button></div>
         <div className="file-row"><label htmlFor="recorder-path">Recorder Log</label><input id="recorder-path" value={recorderPath ? basename(recorderPath) : "No file selected"} readOnly title={recorderPath} className={!recorderPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("recorder")}>Browse</button></div>
+        <FormatStatus kind="EIVA" state={formatStates.eiva} onConfigure={() => setFormatDetails("eiva")} />
+        <FormatStatus kind="RECORDER" state={formatStates.recorder} onConfigure={() => setFormatDetails("recorder")} />
         <div className="shot-interval-row"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={shotIntervalText} onChange={(event) => setShotIntervalText(event.target.value)} aria-invalid={shotIntervalText.length > 0 && !validShotInterval} /><span className="unit">m</span><span className="tolerance-readout">Tolerance <b>{validShotInterval ? `${(shotInterval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></span></div>
         <div className="input-actions">
-          <button className="button primary analyse-button" onClick={analyse} disabled={lifecycle === "running"}>{lifecycle === "running" ? "ANALYSING" : "ANALYSE"}</button>
+          <button className="button primary analyse-button" onClick={analyse} disabled={lifecycle === "running" || formatBlocked || formatNeedsReview}>{lifecycle === "running" ? "ANALYSING" : "ANALYSE"}</button>
           <div className="output-actions" aria-label="Output actions">
-            <button className="button secondary compact-button" onClick={exportQc} disabled={!analysis || analysisStale}><Icon name="download" />Export QC</button>
+            <button className="button secondary compact-button" onClick={exportQc} disabled={!analysis || analysisStale || profileStale}><Icon name="download" />Export QC</button>
             <button className="button secondary compact-button" onClick={saveFixedEiva} disabled={!correctionReady}>Save Fixed EIVA</button>
             <button className="button primary compact-button" onClick={saveFixedPair} disabled={!correctionReady}>Save Fixed Pair</button>
           </div>
@@ -407,7 +509,8 @@ export default function App() {
       </section>
 
       {error && <div className="error-line" role="alert"><strong>{lifecycle === "failed" ? "Analysis issue" : "Export issue"}</strong><span>{error}</span></div>}
-      {analysisStale && <div className="stale-line" role="status"><strong>Analysis settings changed — re-analyse</strong><span>Output actions are disabled until Shot Interval matches the analysed value.</span></div>}
+      {(analysisStale || profileStale) && <div className="stale-line" role="status"><strong>Analysis settings changed — re-analyse</strong><span>Output actions are disabled until Shot Interval and input format profiles match the analysed values.</span></div>}
+      {formatDetails && <FormatDialog kind={formatDetails === "eiva" ? "EIVA" : "RECORDER"} filePath={formatDetails === "eiva" ? eivaPath : recorderPath} state={formatStates[formatDetails]} onCancel={() => setFormatDetails(null)} onUse={(profile) => { const active = { ...profile, profile_hash: "" }; setFormatOverrides((current) => ({ ...current, [formatDetails]: active })); setFormatStates((current) => ({ ...current, [formatDetails]: { ...current[formatDetails], profile: active } })); setFormatDetails(null); }} onSave={(profile) => { const name = window.prompt("Save format profile as", profile?.name || "My format"); if (name) void window.shotlogfixer.saveFormatProfile(profile, name); }} />}
 
       <section className="summary-section" aria-label="Analysis summary">
         <div className="summary-line">
@@ -423,8 +526,9 @@ export default function App() {
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
             ? `${analysis.correction.retained.toLocaleString()} paired shots | ${analysis.summary.total_issues} issues resolved | Validation PASS`
-            : formatDiagnostic(analysis.correction.blocking_reasons.join("; ") || analysis.validation.errors.join("; ") || "Validation did not pass")}</span>
+            : `${correctionReasons.length.toLocaleString()} blocking conditions require review. `}<button className="inline-details" onClick={() => setCorrectionDetailsOpen(true)} disabled={correctionReady}>View details</button></span>
         </div>}
+        {analysis && correctionDetailsOpen && <CorrectionDetails reasons={correctionReasons} onClose={() => setCorrectionDetailsOpen(false)} />}
         {analysis && <div className="correction-preview"><span>Retained / renumbered: <b>{analysis.correction.retained.toLocaleString()}</b></span><span>EIVA-only removed: <b>{analysis.correction.eiva_only_removed}</b></span><span>Not-recorded rows removed: <b>{analysis.correction.no_shot_removed}</b></span><span>Fixed pair rows: <b>{analysis.validation.fixed_eiva_rows.toLocaleString()}</b></span><span>FFID: <b>{analysis.validation.ffid_match_count}/{analysis.validation.ffid_pair_count}</b></span><span>Coordinates: <b>{analysis.validation.coordinate_pass_count}/{analysis.validation.ffid_pair_count}</b></span><span>Max EIVA–Recorder difference: <b>{analysis.validation.max_distance_m === null ? "—" : `${analysis.validation.max_distance_m.toFixed(3)} m`}</b></span></div>}
       </section>
 

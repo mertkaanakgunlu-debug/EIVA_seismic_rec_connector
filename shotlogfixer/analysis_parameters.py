@@ -31,3 +31,23 @@ class AnalysisParameters:
         return {"shot_interval_m": self.shot_interval_m,
                 "match_tolerance_m": self.match_tolerance_m,
                 "recorder_gap_threshold_m": self.recorder_gap_threshold_m}
+
+
+@dataclass(frozen=True)
+class AnalysisConfiguration:
+    """Complete reproducible analysis input, including format interpretation."""
+    parameters: AnalysisParameters
+    eiva_profile: object
+    recorder_profile: object
+
+    @property
+    def eiva_profile_hash(self): return self.eiva_profile.profile_hash
+
+    @property
+    def recorder_profile_hash(self): return self.recorder_profile.profile_hash
+
+    def as_dict(self):
+        return {**self.parameters.as_dict(), "eiva_profile": self.eiva_profile.as_dict(),
+                "recorder_profile": self.recorder_profile.as_dict(),
+                "eiva_profile_hash": self.eiva_profile_hash,
+                "recorder_profile_hash": self.recorder_profile_hash}

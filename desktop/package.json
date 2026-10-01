@@ -1,7 +1,7 @@
 {
   "name": "shotlogfixer-desktop",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Offline seismic acquisition QC and correction utility",
   "author": "ShotLogFixer",
   "main": "dist-electron/main.js",
@@ -38,6 +38,7 @@
     "directories": {
       "output": "../release-builder"
     },
+    "compression": "normal",
     "files": [
       "dist/**/*",
       "dist-electron/**/*",

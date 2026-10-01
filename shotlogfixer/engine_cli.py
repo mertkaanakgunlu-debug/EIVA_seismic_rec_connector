@@ -13,10 +13,15 @@ from typing import Any
 
 from .correction import (CorrectionNotValidatedError, prepare_correction, save_fixed_eiva,
                          save_fixed_pair, sha256_file)
-from .analysis_parameters import AnalysisParameters
+from .analysis_parameters import AnalysisParameters, AnalysisConfiguration
 from .gap_analysis import analyse_recorder_gaps
 from .matcher import match_records
 from .parsers import parse_eiva, parse_recorder
+from .format_detection import detect_file
+from .format_profiles import FormatProfile
+from .format_profiles import ProfileStore, builtin_profiles
+from .profile_validation import validate_profile
+from .table_parser import parse_table
 from .qc import ffid_discontinuities, total_issue_count
 from .report import export_csv, export_txt
 from .version import __version__
@@ -30,6 +35,7 @@ def _error(code: str, message: str, detail: str | None = None) -> dict[str, Any]
 
 
 def _validate_file(value: Any, label: str) -> Path | dict[str, Any]:
+    if isinstance(value, Path): value = str(value)
     if not isinstance(value, str) or not value.strip():
         return _error(f"MISSING_{label.upper()}_FILE", f"Select an {label} file.")
     path = Path(value).expanduser()
@@ -83,7 +89,112 @@ def _parameters(value: Any) -> AnalysisParameters | dict[str, Any]:
         return _error("INVALID_SHOT_INTERVAL", "Enter a finite positive Shot Interval in metres.", str(exc))
 
 
-def analyse(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None) -> dict[str, Any]:
+def _resolve_profile(path, input_type, supplied=None):
+    if supplied is not None:
+        try: profile = FormatProfile.from_dict(supplied)
+        except (ValueError, TypeError) as exc: return None, _error("INVALID_FORMAT_PROFILE", "The input format profile is invalid.", str(exc))
+        if profile.input_type != input_type: return None, _error("INVALID_FORMAT_PROFILE", f"The profile is not for {input_type} input.")
+        text = Path(path).read_bytes()
+        from .source_reader import decode_source
+        decoded, _ = decode_source(text, profile.structure.encoding)
+    else:
+        try:
+            profile, _, _ = detect_file(path, input_type)
+            from .source_reader import decode_source
+            # Detection itself is bounded; once a profile is proposed, validate it
+            # against the complete source before allowing analysis.
+            decoded, _ = decode_source(Path(path).read_bytes(), profile.structure.encoding)
+        except (OSError, ValueError) as exc: return None, _error("FORMAT_DETECTION_FAILED", "Unable to detect the input format.", str(exc))
+    try:
+        table = parse_table(decoded, profile)
+        check = validate_profile(profile, table, require_confirmation=False)
+    except ValueError as exc: return None, _error("FORMAT_NOT_READY", "The input format could not be validated.", str(exc))
+    if not check["valid"]: return None, _error("FORMAT_NOT_READY", "The input format could not be validated.", " ".join(check["errors"]))
+    return profile, None
+
+
+def _format_payload(profile, header_columns=None):
+    data = profile.as_dict()
+    data["profile_hash"] = profile.profile_hash
+    data["delimiter"] = profile.structure.delimiter
+    data["header"] = profile.structure.header_mode
+    data["confidence"] = profile.confidence
+    data["input_type"] = profile.input_type
+    data["header_columns"] = list(header_columns or [])
+    return data
+
+
+def _check_expected_hashes(eiva, recorder, expected):
+    if not expected: return None
+    if expected.get("eiva") != sha256_file(eiva) or expected.get("recorder") != sha256_file(recorder):
+        return _error("INPUT_CHANGED", "Input file changed — format and analysis must be revalidated.")
+    return None
+
+
+def detect_format(path_value: Any, input_type: str):
+    path = _validate_file(path_value, input_type.lower())
+    if isinstance(path, dict): return path
+    try:
+        profile, metadata, text = detect_file(path, input_type)
+        from .source_reader import decode_source
+        text, _ = decode_source(Path(path).read_bytes(), profile.structure.encoding)
+        table = parse_table(text, profile)
+        validation = validate_profile(profile, table, False)
+    except (OSError, ValueError) as exc:
+        return _error("FORMAT_DETECTION_FAILED", "Unable to inspect the selected input format.", str(exc))
+    table_preview = parse_table(text, profile)
+    rows = table_preview.rows
+    def rows_at(mode):
+        if mode == "first": return rows[:20]
+        if mode == "last": return rows[-20:]
+        if not rows: return []
+        step = max(1, len(rows) // 20)
+        return rows[::step][:20]
+    previews = {mode: [{"line": r.source_line_number, "raw": r.raw_text, "cells": r.cells} for r in rows_at(mode)] for mode in ("first", "random", "last")}
+    return {"ok": True, "profile": _format_payload(profile, table.header), "metadata": metadata, "validation": validation, "preview": previews,
+            "columns": table_preview.header or [f"Column {index + 1}" for index in range(table_preview.column_count)]}
+
+
+def preview_format(path_value: Any, input_type: str, profile_data=None):
+    path = _validate_file(path_value, input_type.lower())
+    if isinstance(path, dict): return path
+    profile, failure = _resolve_profile(path, input_type, profile_data)
+    if failure: return failure
+    try:
+        from .source_reader import decode_source
+        text, _ = decode_source(path.read_bytes(), profile.structure.encoding)
+        table = parse_table(text, profile)
+        validation = validate_profile(profile, table, require_confirmation=False)
+    except (OSError, ValueError) as exc:
+        return _error("FORMAT_PREVIEW_FAILED", "Unable to preview the selected format.", str(exc))
+    rows = table.rows
+    def sample(mode):
+        if mode == "first": return rows[:20]
+        if mode == "last": return rows[-20:]
+        step = max(1, len(rows) // 20)
+        return rows[::step][:20]
+    return {"ok": True, "profile": _format_payload(profile, table.header), "validation": validation,
+            "preview": {mode: [{"line": row.source_line_number, "raw": row.raw_text, "cells": row.cells} for row in sample(mode)] for mode in ("first", "random", "last")},
+            "columns": table.header or [f"Column {index + 1}" for index in range(table.column_count)]}
+
+
+def profiles_action(action, profile_data=None, name=None, profile_id=None):
+    store = ProfileStore()
+    try:
+        if action == "list_profiles":
+            return {"ok": True, "profiles": [_format_payload(p) for p in builtin_profiles() + store.load()]}
+        if action == "delete_profile":
+            store.delete(profile_id); return {"ok": True}
+        if action == "save_profile":
+            profile = FormatProfile.from_dict(profile_data)
+            saved = store.save(profile, name, profile_id)
+            return {"ok": True, "profile": _format_payload(saved)}
+    except (OSError, ValueError, TypeError) as exc:
+        return _error("PROFILE_OPERATION_FAILED", "Unable to update local format profiles.", str(exc))
+    return _error("INVALID_PROFILE_ACTION", "Unsupported format profile action.")
+
+
+def analyse(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None) -> dict[str, Any]:
     parameters = _parameters(shot_interval_m)
     if isinstance(parameters, dict): return parameters
     eiva = _validate_file(eiva_path, "EIVA")
@@ -92,21 +203,25 @@ def analyse(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None) -> 
     recorder = _validate_file(recorder_path, "recorder")
     if isinstance(recorder, dict):
         return recorder
+    eiva_profile, failure = _resolve_profile(eiva, "EIVA", eiva_profile_data)
+    if failure: return failure
+    recorder_profile, failure = _resolve_profile(recorder, "RECORDER", recorder_profile_data)
+    if failure: return failure
     try:
-        eiva_records = parse_eiva(eiva)
+        eiva_records = parse_eiva(eiva, eiva_profile)
     except PermissionError as exc:
         return _error("EIVA_PERMISSION_DENIED", "Unable to open the selected EIVA log.", str(exc))
     except (OSError, ValueError) as exc:
         return _error("INVALID_EIVA_FILE", "Unable to parse the selected EIVA log.", str(exc))
     try:
-        recorder_records = parse_recorder(recorder)
+        recorder_records = parse_recorder(recorder, recorder_profile)
     except PermissionError as exc:
         return _error("RECORDER_PERMISSION_DENIED", "Unable to open the selected recorder log.", str(exc))
     except (OSError, ValueError) as exc:
         return _error("INVALID_RECORDER_FILE", "Unable to parse the selected recorder log.", str(exc))
 
     try:
-        bundle = prepare_correction(eiva, recorder, parameters)
+        bundle = prepare_correction(eiva, recorder, parameters, eiva_profile, recorder_profile)
     except (OSError, ValueError) as exc:
         return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
     results = bundle.results
@@ -130,10 +245,14 @@ def analyse(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None) -> 
     if counts["NO_SHOT"]:
         summary["no_shot"] = counts["NO_SHOT"]
     validation = bundle.validation.as_dict() if bundle.validation else {"passed": False, "errors": ["missing validation"]}
+    eiva_headers = list(eiva_records[0].original_values_by_column) if eiva_records else []
+    recorder_headers = list(recorder_records[0].header_fields) if recorder_records and getattr(recorder_records[0], "header_fields", None) else []
+    configuration = AnalysisConfiguration(parameters, eiva_profile, recorder_profile)
     return {
         "ok": True,
         "summary": summary,
         "parameters": parameters.as_dict(),
+        "analysis_configuration": configuration.as_dict(),
         "recorder_gaps": [gap.as_dict() for gap in bundle.recorder_gaps],
         "correction": {
             "safe": bundle.plan.safe_to_build,
@@ -150,38 +269,53 @@ def analyse(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None) -> 
         },
         "validation": validation,
         "input_hashes": bundle.input_hashes,
+        "input_formats": {"eiva": _format_payload(eiva_profile, eiva_headers), "recorder": _format_payload(recorder_profile, recorder_headers)},
         "ffid_jumps": [{"from": before, "to": after} for before, after in ffid_discontinuities(eiva_records)],
         "eiva_headers": list(eiva_records[0].original_values_by_column) if eiva_records else [],
         "records": [_serialize_result(result, eiva_records, index) for index, result in enumerate(results)],
     }
 
 
-def _prepare_for_save(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None):
+def _prepare_for_save(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None):
     parameters = _parameters(shot_interval_m)
     if isinstance(parameters, dict): return parameters
     eiva = _validate_file(eiva_path, "EIVA")
     if isinstance(eiva, dict): return eiva
     recorder = _validate_file(recorder_path, "recorder")
     if isinstance(recorder, dict): return recorder
+    eiva_profile, failure = _resolve_profile(eiva, "EIVA", eiva_profile_data)
+    if failure: return failure
+    recorder_profile, failure = _resolve_profile(recorder, "RECORDER", recorder_profile_data)
+    if failure: return failure
     try:
-        return prepare_correction(eiva, recorder, parameters)
+        return prepare_correction(eiva, recorder, parameters, eiva_profile, recorder_profile)
     except (OSError, ValueError) as exc:
         return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
 
 
-def save_eiva(eiva_path: Any, recorder_path: Any, output_path: Any, overwrite: bool = False, shot_interval_m: Any = None) -> dict[str, Any]:
-    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m)
+def save_eiva(eiva_path: Any, recorder_path: Any, output_path: Any, overwrite: bool = False, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None, expected_hashes=None) -> dict[str, Any]:
+    eiva_check, recorder_check = _validate_file(eiva_path, "EIVA"), _validate_file(recorder_path, "recorder")
+    if isinstance(eiva_check, dict): return eiva_check
+    if isinstance(recorder_check, dict): return recorder_check
+    changed = _check_expected_hashes(eiva_check, recorder_check, expected_hashes)
+    if changed: return changed
+    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m, eiva_profile_data, recorder_profile_data)
     if isinstance(bundle, dict): return bundle
     if not isinstance(output_path, str) or not output_path.strip(): return _error("MISSING_OUTPUT_PATH", "Choose a fixed EIVA destination.")
     try:
         output = save_fixed_eiva(bundle, output_path, [Path(eiva_path), Path(recorder_path)], overwrite)
     except FileExistsError as exc: return _error("OUTPUT_EXISTS", "The fixed EIVA output already exists; confirm overwrite.", str(exc))
     except (CorrectionNotValidatedError, OSError, ValueError) as exc: return _error("SAVE_BLOCKED", "The fixed EIVA file was not written.", str(exc))
-    return {"ok": True, "path": str(output), "rows": bundle.validation.fixed_eiva_count, "validation": bundle.validation.as_dict(), "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
+    return {"ok": True, "path": str(output), "rows": bundle.validation.fixed_eiva_count, "validation": bundle.validation.as_dict(), "profile_hashes": {"eiva": bundle.eiva_profile.profile_hash, "recorder": bundle.recorder_profile.profile_hash}, "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
 
 
-def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_output: Any, overwrite: bool = False, shot_interval_m: Any = None) -> dict[str, Any]:
-    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m)
+def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_output: Any, overwrite: bool = False, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None, expected_hashes=None) -> dict[str, Any]:
+    eiva_check, recorder_check = _validate_file(eiva_path, "EIVA"), _validate_file(recorder_path, "recorder")
+    if isinstance(eiva_check, dict): return eiva_check
+    if isinstance(recorder_check, dict): return recorder_check
+    changed = _check_expected_hashes(eiva_check, recorder_check, expected_hashes)
+    if changed: return changed
+    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m, eiva_profile_data, recorder_profile_data)
     if isinstance(bundle, dict): return bundle
     if not isinstance(eiva_output, str) or not eiva_output.strip() or not isinstance(recorder_output, str) or not recorder_output.strip():
         return _error("MISSING_OUTPUT_PATH", "Choose destinations for both fixed pair files.")
@@ -190,10 +324,10 @@ def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_out
     except FileExistsError as exc: return _error("OUTPUT_EXISTS", "A fixed pair output already exists; confirm overwrite.", str(exc))
     except (CorrectionNotValidatedError, OSError, ValueError) as exc: return _error("SAVE_BLOCKED", "The fixed pair was not written.", str(exc))
     return {"ok": True, "eiva_path": str(outputs[0]), "recorder_path": str(outputs[1]), "rows": bundle.validation.fixed_eiva_count,
-            "validation": bundle.validation.as_dict(), "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
+            "validation": bundle.validation.as_dict(), "profile_hashes": {"eiva": bundle.eiva_profile.profile_hash, "recorder": bundle.recorder_profile.profile_hash}, "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
 
 
-def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interval_m: Any = None) -> dict[str, Any]:
+def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None, expected_hashes=None) -> dict[str, Any]:
     parameters = _parameters(shot_interval_m)
     if isinstance(parameters, dict): return parameters
     eiva = _validate_file(eiva_path, "EIVA")
@@ -202,11 +336,17 @@ def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interva
     recorder = _validate_file(recorder_path, "recorder")
     if isinstance(recorder, dict):
         return recorder
+    changed = _check_expected_hashes(eiva, recorder, expected_hashes)
+    if changed: return changed
     if not isinstance(output_path, str) or not output_path.strip():
         return _error("MISSING_EXPORT_PATH", "Choose a destination for the QC TXT.")
     output = Path(output_path).expanduser()
     try:
-        eiva_records, recorder_records = parse_eiva(eiva), parse_recorder(recorder)
+        eiva_profile, failure = _resolve_profile(eiva, "EIVA", eiva_profile_data)
+        if failure: return failure
+        recorder_profile, failure = _resolve_profile(recorder, "RECORDER", recorder_profile_data)
+        if failure: return failure
+        eiva_records, recorder_records = parse_eiva(eiva, eiva_profile), parse_recorder(recorder, recorder_profile)
         raw_results = match_records(eiva_records, recorder_records, parameters)
         gaps = analyse_recorder_gaps(eiva_records, recorder_records, raw_results, parameters)
         # `.txt` is the product format. Keep `.csv` as a legacy direct-API
@@ -216,9 +356,11 @@ def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interva
         else:
             # Export the same resolved records and gap attribution the operator
             # reviewed; retain the legacy raw CSV API above for integrations.
-            bundle = prepare_correction(eiva, recorder, parameters)
+            bundle = prepare_correction(eiva, recorder, parameters, eiva_profile, recorder_profile)
             raw_results, gaps = bundle.results, bundle.recorder_gaps
-            export_txt(output, raw_results, parameters, gaps)
+            eiva_headers = list(eiva_records[0].original_values_by_column) if eiva_records else []
+            recorder_headers = list(recorder_records[0].header_fields) if recorder_records and getattr(recorder_records[0], "header_fields", None) else []
+            export_txt(output, raw_results, parameters, gaps, {"eiva": _format_payload(eiva_profile, eiva_headers), "recorder": _format_payload(recorder_profile, recorder_headers)})
     except PermissionError as exc:
         return _error("EXPORT_PERMISSION_DENIED", "Unable to write the QC TXT file.", str(exc))
     except (OSError, ValueError) as exc:
@@ -228,14 +370,20 @@ def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interva
 
 def dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     action = payload.get("action", "analyse")
+    if action == "detect_format":
+        return detect_format(payload.get("path"), str(payload.get("input_type", "")).upper())
+    if action == "preview_format":
+        return preview_format(payload.get("path"), str(payload.get("input_type", "")).upper(), payload.get("profile"))
+    if action in {"list_profiles", "save_profile", "delete_profile"}:
+        return profiles_action(action, payload.get("profile"), payload.get("name"), payload.get("profile_id"))
     if action == "analyse":
-        return analyse(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("shot_interval_m"))
+        return analyse(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"))
     if action in {"export", "export_qc"}:
-        return export_qc(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), payload.get("shot_interval_m"))
+        return export_qc(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"), payload.get("expected_hashes"))
     if action == "save_fixed_eiva":
-        return save_eiva(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), bool(payload.get("overwrite")), payload.get("shot_interval_m"))
+        return save_eiva(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), bool(payload.get("overwrite")), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"), payload.get("expected_hashes"))
     if action == "save_fixed_pair":
-        return save_pair(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("eiva_output"), payload.get("recorder_output"), bool(payload.get("overwrite")), payload.get("shot_interval_m"))
+        return save_pair(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("eiva_output"), payload.get("recorder_output"), bool(payload.get("overwrite")), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"), payload.get("expected_hashes"))
     return _error("UNKNOWN_ACTION", f"Unsupported engine action: {action}")
 
 

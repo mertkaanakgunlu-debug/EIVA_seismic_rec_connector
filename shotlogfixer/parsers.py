@@ -23,7 +23,12 @@ def _read(path: Path) -> str:
     return decode_source(path.read_bytes())[0]
 
 
-def parse_eiva_text(text: str) -> list[EivaRecord]:
+def parse_eiva_text(text: str, profile=None) -> list[EivaRecord]:
+    if profile is not None:
+        from .canonical_mapping import parse_canonical
+        records = parse_canonical(text, profile)
+        if profile.input_type != "EIVA": raise ValueError("EIVA parser received a non-EIVA profile")
+        return records
     reader = csv.reader(io.StringIO(text, newline=""), strict=True)
     try:
         original_header = [h.strip() for h in next(reader)]
@@ -59,7 +64,10 @@ def parse_eiva_text(text: str) -> list[EivaRecord]:
     return out
 
 
-def parse_eiva(path: str | Path) -> list[EivaRecord]:
+def parse_eiva(path: str | Path, profile=None) -> list[EivaRecord]:
+    if profile is not None:
+        from .source_reader import decode_source as decode
+        return parse_eiva_text(decode(Path(path).read_bytes(), profile.structure.encoding)[0], profile)
     return parse_eiva_text(_read(Path(path)))
 
 
@@ -73,7 +81,11 @@ def classify_recorder_row(record: RecorderRecord) -> str:
     return "INVALID"
 
 
-def parse_recorder_text(text: str) -> list[RecorderRecord]:
+def parse_recorder_text(text: str, profile=None) -> list[RecorderRecord]:
+    if profile is not None:
+        from .canonical_mapping import parse_canonical
+        if profile.input_type != "RECORDER": raise ValueError("Recorder parser received a non-Recorder profile")
+        return parse_canonical(text, profile)
     out = []
     header_seen = False
     header_fields: list[str] = []
@@ -98,5 +110,8 @@ def parse_recorder_text(text: str) -> list[RecorderRecord]:
     return out
 
 
-def parse_recorder(path: str | Path) -> list[RecorderRecord]:
+def parse_recorder(path: str | Path, profile=None) -> list[RecorderRecord]:
+    if profile is not None:
+        from .source_reader import decode_source as decode
+        return parse_recorder_text(decode(Path(path).read_bytes(), profile.structure.encoding)[0], profile)
     return parse_recorder_text(_read(Path(path)))

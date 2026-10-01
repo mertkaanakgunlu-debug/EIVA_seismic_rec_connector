@@ -4,7 +4,7 @@ $desktop = Join-Path $root "desktop"
 $packaging = Join-Path $root "packaging"
 $engineOut = Join-Path $packaging "out"
 $release = Join-Path $root "release"
-$builderOut = Join-Path $root "release-builder"
+$builderOut = Join-Path $env:TEMP "ShotLogFixer-release-builder"
 
 Remove-Item -LiteralPath $engineOut, $builderOut, $release -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $engineOut, $release | Out-Null
@@ -16,7 +16,7 @@ try {
   Push-Location $desktop
   try {
     npm run build
-    npm exec electron-builder -- --win portable --x64 --publish never
+    npm exec electron-builder -- --win portable --x64 --publish never --config.directories.output=$builderOut
   } finally { Pop-Location }
   $artifact = Join-Path $builderOut "ShotLogFixer-Portable.exe"
   if (-not (Test-Path -LiteralPath $artifact)) { throw "Portable artifact not found: $artifact" }

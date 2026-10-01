@@ -38,13 +38,13 @@ def _distances(result, pairs, parameters: AnalysisParameters):
         result.median_distance_m = statistics.median(distances)
 
 
-def validate_serialized(eiva_text: str, recorder_text: str, parameters: AnalysisParameters | None = None) -> ValidationResult:
+def validate_serialized(eiva_text: str, recorder_text: str, parameters: AnalysisParameters | None = None, eiva_profile=None, recorder_profile=None) -> ValidationResult:
     parameters = parameters or AnalysisParameters(2.0)
     result = ValidationResult(False)
     result.shot_interval_m, result.match_tolerance_m = parameters.shot_interval_m, parameters.match_tolerance_m
     try:
-        eiva = parse_eiva_text(eiva_text)
-        recorder = parse_recorder_text(recorder_text)
+        eiva = parse_eiva_text(eiva_text, eiva_profile)
+        recorder = parse_recorder_text(recorder_text, recorder_profile)
     except (ValueError, IndexError) as exc:
         result.errors.append(f"Serialized candidate could not be parsed: {exc}")
         return result
@@ -58,14 +58,18 @@ def validate_serialized(eiva_text: str, recorder_text: str, parameters: Analysis
     result.no_shot_rows_remaining = sum(classify_recorder_row(row) == "NO_SHOT" for row in recorder)
     result.invalid_rows_remaining = sum(classify_recorder_row(row) == "INVALID" for row in recorder)
     for row in eiva:
-        values = {key.lower(): value for key, value in row.original_values_by_column.items()}
-        for name in ("e(spark)", "n(spark)"):
-            if not re.fullmatch(r"[+-]?\d+\.\d{2}", values[name].strip()):
-                result.errors.append(f"EIVA line {row.source_line_number}: coordinates are not two decimals")
+        if eiva_profile:
+            coordinate_values = [row.original_fields[eiva_profile.mapping[role]] for role in ("EIVA_EASTING", "EIVA_NORTHING")]
+        else:
+            values = {key.lower(): value for key, value in row.original_values_by_column.items()}
+            coordinate_values = [values[name] for name in ("e(spark)", "n(spark)")]
+        for value in coordinate_values:
+            if not re.fullmatch(r"[+-]?\d+\.\d{2}", value.strip()): result.errors.append(f"EIVA line {row.source_line_number}: coordinates are not two decimals")
         if row.easting_spark == INVALID_COORDINATE or row.northing_spark == INVALID_COORDINATE:
             result.no_shot_rows_remaining += 1
     for row in recorder:
-        for value in row.original_fields[1:3]:
+        indices = [recorder_profile.mapping[r] for r in ("RECORDER_X", "RECORDER_Y")] if recorder_profile else [1, 2]
+        for value in (row.original_fields[i] for i in indices if i < len(row.original_fields)):
             if not re.fullmatch(r"[+-]?\d+\.\d{2}", value):
                 result.errors.append(f"Recorder line {row.source_line_number}: coordinates are not two decimals")
     _distances(result, zip(eiva, recorder), parameters)
@@ -85,7 +89,7 @@ def validate_serialized(eiva_text: str, recorder_text: str, parameters: Analysis
 def validate_candidates(source_eiva: list[EivaRecord], source_recorder: list[RecorderRecord],
                         plan: CorrectionPlan, eiva_text: str, recorder_text: str,
                         results: list[MatchResult], parameters: AnalysisParameters | None = None,
-                        recorder_gaps=None) -> ValidationResult:
+                        recorder_gaps=None, eiva_profile=None, recorder_profile=None) -> ValidationResult:
     """Check original precision, coverage and provenance; then reparse final text."""
     parameters = parameters or AnalysisParameters(2.0)
     recorder_gaps = recorder_gaps or []
@@ -133,7 +137,7 @@ def validate_candidates(source_eiva: list[EivaRecord], source_recorder: list[Rec
     no_shot_ids = {row.ffid for row, kind in zip(source_recorder, classes) if kind == "NO_SHOT"}
     if any(row.ffid in no_shot_ids for _, row in source_pairs): result.errors.append("NO_SHOT FFID retained")
 
-    serialized = validate_serialized(eiva_text, recorder_text, parameters)
+    serialized = validate_serialized(eiva_text, recorder_text, parameters, eiva_profile, recorder_profile)
     result.errors.extend(serialized.errors)
     result.fixed_eiva_count, result.fixed_recorder_count = serialized.fixed_eiva_count, serialized.fixed_recorder_count
     result.ffid_pair_count, result.ffid_match_count = serialized.ffid_pair_count, serialized.ffid_match_count
@@ -142,7 +146,7 @@ def validate_candidates(source_eiva: list[EivaRecord], source_recorder: list[Rec
     result.invalid_rows_remaining += serialized.invalid_rows_remaining
     expected_ids = [row.ffid for row in source_recorder if classify_recorder_row(row) == "VALID"]
     try:
-        fixed_eiva, fixed_recorder = parse_eiva_text(eiva_text), parse_recorder_text(recorder_text)
+        fixed_eiva, fixed_recorder = parse_eiva_text(eiva_text, eiva_profile), parse_recorder_text(recorder_text, recorder_profile)
         actual_ids = [row.ffid for row in fixed_recorder]
         result.missing_ffids = list((Counter(expected_ids) - Counter(actual_ids)).elements())
         result.extra_ffids = list((Counter(actual_ids) - Counter(expected_ids)).elements())
@@ -152,17 +156,24 @@ def validate_candidates(source_eiva: list[EivaRecord], source_recorder: list[Rec
             result.errors.append("Fixed row count differs from expected VALID recorder count")
         # Independently check original navigation measurements and unrelated field values.
         for (original_eiva, original_recorder), output_eiva, output_recorder in zip(source_pairs, fixed_eiva, fixed_recorder):
-            header = [key.lower() for key in original_eiva.original_values_by_column]
-            targeted = {header.index(name) for name in ("ffid", "e(spark)", "n(spark)")}
+            if eiva_profile:
+                targeted = {eiva_profile.mapping[name] for name in ("FFID", "EIVA_EASTING", "EIVA_NORTHING")}
+                eiva_indices = eiva_profile.mapping
+            else:
+                header = [key.lower() for key in original_eiva.original_values_by_column]
+                targeted = {header.index(name) for name in ("ffid", "e(spark)", "n(spark)")}
+                eiva_indices = {"FFID": header.index("ffid"), "EIVA_EASTING": header.index("e(spark)"), "EIVA_NORTHING": header.index("n(spark)")}
             if len(original_eiva.original_fields) != len(output_eiva.original_fields) or any(
                 original != fixed for i, (original, fixed) in enumerate(zip(original_eiva.original_fields, output_eiva.original_fields)) if i not in targeted):
                 result.errors.append("Unrelated EIVA fields changed")
-            values = {key.lower(): value.strip() for key, value in output_eiva.original_values_by_column.items()}
-            if values["e(spark)"] != f"{original_eiva.easting_spark:.2f}" or values["n(spark)"] != f"{original_eiva.northing_spark:.2f}":
+            if output_eiva.original_fields[eiva_indices["EIVA_EASTING"]].strip() != f"{original_eiva.easting_spark:.2f}" or output_eiva.original_fields[eiva_indices["EIVA_NORTHING"]].strip() != f"{original_eiva.northing_spark:.2f}":
                 result.errors.append("Original EIVA navigation coordinate was changed")
-            if output_recorder.original_fields[:1] + output_recorder.original_fields[3:] != original_recorder.original_fields[:1] + original_recorder.original_fields[3:]:
+            rec_indices = recorder_profile.mapping if recorder_profile else {"FFID": 0, "RECORDER_X": 1, "RECORDER_Y": 2}
+            rec_targeted = set(rec_indices.values())
+            if len(original_recorder.original_fields) != len(output_recorder.original_fields) or any(
+                original != fixed for i, (original, fixed) in enumerate(zip(original_recorder.original_fields, output_recorder.original_fields)) if i not in rec_targeted):
                 result.errors.append("Unrelated recorder fields or FFID changed")
-            if output_recorder.original_fields[1:3] != [f"{original_recorder.source_x:.2f}", f"{original_recorder.source_y:.2f}"]:
+            if output_recorder.original_fields[rec_indices["RECORDER_X"]] != f"{original_recorder.source_x:.2f}" or output_recorder.original_fields[rec_indices["RECORDER_Y"]] != f"{original_recorder.source_y:.2f}":
                 result.errors.append("Original recorder coordinates were changed")
     except (ValueError, IndexError, KeyError) as exc:
         result.errors.append(f"Candidate provenance check failed: {exc}")

@@ -133,14 +133,23 @@ ipcMain.on("renderer-heartbeat", (_event, snapshot: Record<string, unknown>) => 
 
 ipcMain.handle("get-renderer-heartbeat", () => lastHeartbeat);
 
-ipcMain.handle("analyse-files", (_event, payload: { eivaPath: string; recorderPath: string; shotIntervalM: number }) => {
+ipcMain.handle("analyse-files", (_event, payload: { eivaPath: string; recorderPath: string; shotIntervalM: number; eivaProfile?: unknown; recorderProfile?: unknown }) => {
   diagnosticLog("analyse: ipc-request-received", { eivaPath: payload.eivaPath, recorderPath: payload.recorderPath });
   const started = performance.now();
-  return runEngine({ action: "analyse", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, shot_interval_m: payload.shotIntervalM }, "analyse").then((response) => {
+  return runEngine({ action: "analyse", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, shot_interval_m: payload.shotIntervalM, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile }, "analyse").then((response) => {
     diagnosticLog("analyse: ipc-response-returned", { durationMs: performance.now() - started });
     return response;
   });
 });
+
+ipcMain.handle("inspect-format", (_event, payload: { path: string; inputType: "EIVA" | "RECORDER" }) =>
+  runEngine({ action: "detect_format", path: payload.path, input_type: payload.inputType }, "detect-format"));
+
+ipcMain.handle("preview-format", (_event, payload: { path: string; inputType: "EIVA" | "RECORDER"; profile: unknown }) =>
+  runEngine({ action: "preview_format", path: payload.path, input_type: payload.inputType, profile: payload.profile }, "preview-format"));
+
+ipcMain.handle("format-profiles", (_event, payload: { action: string; profile?: unknown; name?: string; profileId?: string }) =>
+  runEngine({ action: payload.action, profile: payload.profile, name: payload.name, profile_id: payload.profileId }, "format-profile"));
 
 ipcMain.handle("select-qc-export-path", async (_event, payload: { eivaPath?: string }) => {
   const defaultPath = payload?.eivaPath ? path.join(path.dirname(payload.eivaPath), `${path.parse(payload.eivaPath).name}_qc.txt`) : "shotlogfixer_qc.txt";
@@ -152,8 +161,8 @@ ipcMain.handle("select-qc-export-path", async (_event, payload: { eivaPath?: str
   return result.canceled ? null : result.filePath ? ensureTxtPath(result.filePath) : null;
 });
 
-ipcMain.handle("export-qc", (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string; shotIntervalM: number }) =>
-  runEngine({ action: "export_qc", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM }));
+ipcMain.handle("export-qc", (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string; shotIntervalM: number; expectedHashes?: unknown; eivaProfile?: unknown; recorderProfile?: unknown }) =>
+  runEngine({ action: "export_qc", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM, expected_hashes: payload.expectedHashes, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile }));
 
 function fixedStem(filePath: string) {
   const parsed = path.parse(filePath);
@@ -185,14 +194,14 @@ async function confirmOverwrite(paths: string[]) {
   return answer.response === 1;
 }
 
-ipcMain.handle("save-fixed-eiva", async (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string; shotIntervalM: number }) => {
+ipcMain.handle("save-fixed-eiva", async (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string; shotIntervalM: number; expectedHashes?: unknown; eivaProfile?: unknown; recorderProfile?: unknown }) => {
   if (!(await confirmOverwrite([payload.outputPath]))) return { ok: false, error: { code: "SAVE_CANCELLED", message: "Save cancelled." } };
-  return runEngine({ action: "save_fixed_eiva", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM, overwrite: true });
+  return runEngine({ action: "save_fixed_eiva", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM, overwrite: true, expected_hashes: payload.expectedHashes, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile });
 });
 
-ipcMain.handle("save-fixed-pair", async (_event, payload: { eivaPath: string; recorderPath: string; eivaOutput: string; recorderOutput: string; shotIntervalM: number }) => {
+ipcMain.handle("save-fixed-pair", async (_event, payload: { eivaPath: string; recorderPath: string; eivaOutput: string; recorderOutput: string; shotIntervalM: number; expectedHashes?: unknown; eivaProfile?: unknown; recorderProfile?: unknown }) => {
   if (!(await confirmOverwrite([payload.eivaOutput, payload.recorderOutput]))) return { ok: false, error: { code: "SAVE_CANCELLED", message: "Save cancelled." } };
-  return runEngine({ action: "save_fixed_pair", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, eiva_output: payload.eivaOutput, recorder_output: payload.recorderOutput, shot_interval_m: payload.shotIntervalM, overwrite: true });
+  return runEngine({ action: "save_fixed_pair", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, eiva_output: payload.eivaOutput, recorder_output: payload.recorderOutput, shot_interval_m: payload.shotIntervalM, overwrite: true, expected_hashes: payload.expectedHashes, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile });
 });
 
 async function waitForFrames(window: BrowserWindow, count = 2) {

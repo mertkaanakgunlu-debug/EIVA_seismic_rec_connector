@@ -1,4 +1,4 @@
-# ShotLogFixer 0.3.0
+# ShotLogFixer 0.4.0
 
 Offline QC utility comparing an EIVA navigation CSV/TXT log with a whitespace-delimited seismic recorder header. It uses only `E(Spark), N(Spark)` against `SOU_X, SOU_Y` in acquisition order; FFID and timestamps are retained for audit but never used as matching keys. The operator supplies the nominal shot interval; matching uses Euclidean distance with the derived half-interval tolerance. `MATCHED`, `EIVA_ONLY`, `NO_SHOT`, `RECORDER_INVALID`, and `REVIEW` describe record-level QC, while Recorder spatial gaps are separate geometry events. Source files are never modified.
 
@@ -27,7 +27,7 @@ The renderer keeps the compact Phase 2 layout and canvas acquisition timeline. T
 
 To run the diagnostic smoke test, use `npm run electron:smoke`. It clicks the real ThemePicker and Columns controls, waits for two animation frames after each theme change, and verifies heartbeat progress. An analysis smoke pass can be added by setting `SHOTLOGFIXER_SMOKE_EIVA` and `SHOTLOGFIXER_SMOKE_RECORDER` to deterministic fixture paths before running the command; it drives the real Analyse button and checks the post-commit UI. For controlled isolation runs, pass `--isolation=header-only`, `--isolation=no-table`, `--isolation=no-timeline`, or `--css=minimal` after the Electron entry point. Diagnostics are opt-in with `--renderer-diagnostics`; normal `electron .` runs stay quiet and packaged builds do not enable them.
 
-The adapter reports version `0.3.0` in its structured response. The adapter can also be called directly with JSON on stdin:
+The adapter reports version `0.4.0` in its structured response. Before analysis it deterministically detects a versioned input format profile for each file. Delimiter, header mode, encoding, canonical FFID/X/Y mapping, validation counts, and a SHA-256 profile hash are returned in `input_formats`; `detect_format` is available through the same JSON boundary for preview/configuration. Built-in EIVA CSV, Recorder header, and headerless comma Pronav profiles are read-only, while user profiles are stored as local JSON under `%APPDATA%\ShotLogFixer\profiles\format-profiles.json`. QC TXT includes an `[INPUT_FORMATS]` provenance section. The adapter can also be called directly with JSON on stdin:
 
 ```text
 python -m shotlogfixer.engine_cli
