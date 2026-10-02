@@ -1,7 +1,7 @@
 import type { Association, EngineRecord, QcFinding, QcSeverity } from "./types";
 
 const ASSOCIATION_LABELS: Record<Association, string> = {
-  ASSIGNED: "Matched", TARGET_ONLY: "EIVA-only", INVALID: "Invalid", NO_SHOT: "No shot", BLOCKED: "Unmatched recorder",
+  ASSIGNED: "Matched", TARGET_ONLY: "EIVA-only", INVALID: "Invalid", NO_SHOT: "No shot", BLOCKED: "Unmatched",
 };
 const SEVERITY_LABELS: Record<QcSeverity, string> = { OK: "OK", INFO: "Note", WARNING: "Warning", SEVERE: "Severe" };
 // Short operator-facing labels for the QC table cell. The canonical codes stay in the data and in the QC export.

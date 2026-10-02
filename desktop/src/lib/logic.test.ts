@@ -105,7 +105,7 @@ describe("association and QC are separate axes", () => {
   it("keeps canonical codes while presenting readable labels", () => {
     expect(formatAssociation("ASSIGNED")).toBe("Matched");
     expect(formatAssociation("TARGET_ONLY")).toBe("EIVA-only");
-    expect(formatAssociation("BLOCKED")).toBe("Unmatched recorder");
+    expect(formatAssociation("BLOCKED")).toBe("Unmatched");
     expect(formatSeverity("OK")).toBe("OK");
     expect(formatQcCode("ASSOCIATION_DISTANCE_LARGE")).toBe("Far from EIVA position");
     expect(formatQcCode("ASSOCIATION_BLOCKED")).toBe("No EIVA match");
