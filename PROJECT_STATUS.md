@@ -22,7 +22,8 @@ _Last updated: 2026-10-02 (bootstrap)_
   bootstrap); QC shows it only indirectly (TASK-002).
 
 ## Active task
-None.
+- [TASK-UI-001](tasks/TASK-UI-001-window-and-overlay-polish.md) — window and overlay polish (desktop UI only).
+  In progress in its own thread. Independent of TASK-001–004 and may run alongside them.
 
 ## Queued tasks (in order)
 1. [TASK-001](tasks/TASK-001-golden-regression-dataset.md) — compact golden regression dataset (tests only).
