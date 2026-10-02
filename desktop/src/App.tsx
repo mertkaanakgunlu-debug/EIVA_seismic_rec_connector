@@ -82,11 +82,6 @@ function ConfigureFormatButton({ kind, state, onConfigure }: { kind: "EIVA" | "R
 function AnalysisSettings({ value, onChange, valid, interval }: { value: string; onChange: (value: string) => void; valid: boolean; interval: number }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const frame = requestAnimationFrame(() => document.getElementById("shot-interval")?.focus());
-    return () => cancelAnimationFrame(frame);
-  }, [open]);
   return <>
     <button ref={buttonRef} className={`settings-button${valid ? "" : " is-invalid"}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((current) => !current)} title={valid ? `Shot Interval ${interval} m` : "Shot Interval needs a finite positive value"}><Icon name="sliders" />Settings</button>
     {open && <Popover anchorRef={buttonRef} onClose={() => setOpen(false)} className="settings-panel" role="dialog" aria-label="Analysis settings">
