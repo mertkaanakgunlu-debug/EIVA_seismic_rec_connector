@@ -85,3 +85,10 @@ def test_parameters_are_qc_bands_not_a_match_tolerance():
     for value in (None, "", 0, -1, float("nan"), float("inf"), True):
         with pytest.raises(ValueError):
             AnalysisParameters(value)
+
+
+def test_target_row_without_an_ffid_cell_is_still_usable_for_validation():
+    profile = FormatProfile("t", "t", "EIVA", Structure("comma", "ABSENT"),
+                            (("EIVA_EASTING", 0), ("EIVA_NORTHING", 1), ("FFID", 3)))
+    assert usable(["1", "2"], profile)                       # the FFID is only a diagnostic for the target
+    assert not usable(["1"], profile)                        # but the coordinates are required

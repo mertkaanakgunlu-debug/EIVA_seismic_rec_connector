@@ -262,3 +262,12 @@ def test_record_level_incomplete_when_target_has_fewer_rows_than_valid_reference
     assert not result.complete and result.direction == "TARGET_TO_REFERENCE"
     assert len(result.associations) == 3 and len(result.unplaced_reference_rows) == 1
     assert len(set(a.target_row for a in result.associations)) == 3
+
+
+def test_large_exact_tables_fall_back_to_the_corridor_instead_of_exhausting_memory(monkeypatch):
+    import shotlogfixer.alignment as alignment
+    monkeypatch.setattr(alignment, "MAX_EXACT_STATES", 500)
+    base = line(120)
+    ref = [base[i] for i in range(0, 120, 2)]                      # m=60, slack=60 -> 60*61 > 500 cells
+    emb = alignment.embed_ordered(ref, base, CAP)
+    assert emb.windowed and emb.targets == list(range(0, 120, 2))

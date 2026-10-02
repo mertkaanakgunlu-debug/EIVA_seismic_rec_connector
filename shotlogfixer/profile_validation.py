@@ -15,11 +15,12 @@ def usable(cells, profile):
     The reference input's FFID is authoritative, so it must be an integer.  The target's own FFID is
     only a diagnostic (the corrected copy overwrites it), so any text is acceptable there."""
     try:
-        values = [cells[profile.mapping[role]] for role in ROLES[profile.input_type]]
+        ffid_role, x_role, y_role = ROLES[profile.input_type]
         if profile.workflow_role == "REFERENCE":
-            ffid = finite(values[0])
+            ffid = finite(cells[profile.mapping[ffid_role]])
             if ffid is None or not ffid.is_integer(): return False
-        return all(finite(v) is not None for v in values[1:])
+        # A target row without an FFID cell is still usable: it is reported later and only blocks if it must be written.
+        return all(finite(cells[profile.mapping[role]]) is not None for role in (x_role, y_role))
     except (IndexError, KeyError, TypeError, AttributeError): return False
 
 

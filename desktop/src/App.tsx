@@ -442,6 +442,7 @@ export default function App() {
   const medianDistance = distances.length ? distances[Math.floor(distances.length / 2)] : null;
   const maxDistance = distances.length ? distances[distances.length - 1] : null;
   const summary = analysis?.summary;
+  const displacedRuns = analysis?.qc.summary.by_code.ASSOCIATION_RUN_DISPLACED ?? 0;
   const counterTotal = (group: GroupKey) => problemGroups[group].length;
 
   return <div className="app-shell" data-diagnostics-isolation={isolation}>
@@ -488,7 +489,7 @@ export default function App() {
         {analysis && <div className={`correction-line ${correctionReady ? "correction-ready" : "correction-blocked"}`}>
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
-            ? `${analysis.correction.assigned.toLocaleString()} recorder records assigned · ${(analysis.correction.target_only_removed + analysis.correction.invalid_target_removed).toLocaleString()} target rows removed · corrected copy ${analysis.correction.corrected_rows.toLocaleString()} rows (expected ${analysis.correction.expected_rows.toLocaleString()}) · QC warnings do not block output`
+            ? `${analysis.correction.assigned.toLocaleString()} recorder records assigned · ${(analysis.correction.target_only_removed + analysis.correction.invalid_target_removed).toLocaleString()} target rows removed · corrected copy ${analysis.correction.corrected_rows.toLocaleString()} rows (expected ${analysis.correction.expected_rows.toLocaleString()}) · QC warnings do not block output${displacedRuns ? ` · ${displacedRuns} displaced run${displacedRuns === 1 ? "" : "s"}: review QC before saving` : ""}`
             : `${correctionBlockers.length.toLocaleString()} structural blocker${correctionBlockers.length === 1 ? "" : "s"}. `}<button className="inline-details" onClick={() => setCorrectionDetailsOpen(true)} disabled={correctionReady}>View details</button></span>
         </div>}
         {analysis && correctionDetailsOpen && <CorrectionDetails blockers={correctionBlockers} onClose={() => setCorrectionDetailsOpen(false)} />}

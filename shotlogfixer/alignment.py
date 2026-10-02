@@ -38,6 +38,7 @@ from .models import SourceRecord, VALID
 UNIT = 10 ** 9            # integer cost units per metre (nanometre resolution)
 SKIP_EVENT_COST = 1       # one unit per skip event: a tie-breaker only
 FULL_BAND_MAX_SLACK = 192  # up to this slack every offset is searched exactly
+MAX_EXACT_STATES = 6_000_000  # exact DP table budget (cells); larger problems use the corridor
 CORRIDOR_HALF_WIDTH = 24
 MAX_ALTERNATIVES = 4
 _INF = 1 << 100
@@ -154,7 +155,8 @@ def embed_ordered(a_pts: Sequence[Point], b_pts: Sequence[Point], cap_m: float,
     cap_units = round(cap_m * UNIT)
     margin_units = round(ambiguity_margin_m * UNIT)
     cost = _cost_function(a_pts, b_pts, cap_m, cap_units)
-    windowed = slack > full_band_max_slack
+    # Three int tables of m x (slack + 1) cells are held: fall back to the corridor when the exact table would be huge.
+    windowed = slack > full_band_max_slack or m * (slack + 1) > MAX_EXACT_STATES
     if windowed:
         lo, hi = _corridor_windows(a_pts, b_pts, slack, cap_m, CORRIDOR_HALF_WIDTH)
     else:
