@@ -6,7 +6,7 @@ _Last updated: 2026-10-02 (bootstrap)_
 - Commit `7ef755d3adb1b6010233d61619f5342d7917ec9b` on branch `phase5-recorder-authoritative-alignment`
   (ShotLogFixer 0.5.0). History is linear from `e071a04`; every older `phase*`, `runtime-*` and `ui-*` branch is an
   ancestor of this commit.
-- Last accepted commit: `7ef755d` (bootstrap baseline; no task accepted yet).
+- Last accepted commit: `b63db9e` (TASK-UI-001, not yet merged into the baseline).
 
 ## Completed capabilities (at baseline)
 - Generic, profile-driven parsing of recorder and EIVA text files with deterministic format detection and local user
@@ -21,12 +21,15 @@ _Last updated: 2026-10-02 (bootstrap)_
 - The 104 → 105 / ~207 FFID-divergence scenario matches correctly by coordinates (checked with a synthetic run at
   bootstrap); QC shows it only indirectly (TASK-002).
 
+## Accepted, awaiting CTO review before merge
+- [TASK-UI-001](tasks/TASK-UI-001-window-and-overlay-polish.md) — window and overlay polish. Accepted at `b63db9e` on
+  `claude/task-ui-001-window-overlay-polish-7kg905` (draft PR #2 into the baseline branch). Verified: diff confined to
+  `desktop/`, typecheck clean, desktop tests 11/11, build OK, Electron checked at 1440×900 and 1366×768.
+
 ## Active task
-- [TASK-UI-001](tasks/TASK-UI-001-window-and-overlay-polish.md) — window and overlay polish (desktop UI only).
-  In progress in its own thread. Independent of TASK-001–004 and may run alongside them.
 - [TASK-UI-002](tasks/TASK-UI-002-compact-controls-and-qc-usability.md) — compact controls and QC usability (desktop UI
-  only). Depends on TASK-UI-001; in progress in its own thread on a branch stacked on TASK-UI-001. The CTO's final
-  substantial UI polish task. Nothing merges until the CTO has reviewed it.
+  only). Stacked on the TASK-UI-001 branch. The CTO's final substantial UI polish task; nothing merges until the CTO
+  has reviewed it. Independent of TASK-001–004.
 
 ## Queued tasks (in order)
 1. [TASK-001](tasks/TASK-001-golden-regression-dataset.md) — compact golden regression dataset (tests only).
