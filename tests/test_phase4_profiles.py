@@ -11,13 +11,24 @@ def test_pronav_headerless_comma_is_detected_and_analyzed(tmp_path: Path):
     recorder = tmp_path / "pronav.txt"
     eiva.write_text("FFID,E(Spark),N(Spark)\n101,615190.23,4645679.70\n102,615192.76,4645681.13\n", encoding="utf-8")
     recorder.write_text("101,615190.23,4645679.7\n102,615192.76,4645681.13\n", encoding="utf-8")
-    result = analyse(eiva, recorder, 3.125)
+    result = analyse({"reference_path": recorder, "target_path": eiva, "shot_interval_m": 3.125})
     assert result["ok"]
-    profile = result["input_formats"]["recorder"]
+    profile = result["input_formats"]["reference"]
     assert profile["delimiter"] == "comma"
     assert profile["header"] == "ABSENT"
     assert profile["column_mapping"] == {"FFID": 0, "RECORDER_X": 1, "RECORDER_Y": 2}
-    assert result["summary"]["recorder_invalid"] == 0
+    assert result["summary"]["reference_invalid"] == 0 and result["summary"]["assigned"] == 2
+
+
+def test_target_with_text_record_identifiers_is_accepted_because_its_ffid_is_replaced(tmp_path: Path):
+    target = tmp_path / "target.csv"
+    reference = tmp_path / "reference.txt"
+    target.write_text("FFID,E(Spark),N(Spark)\nL1-0001,615190.23,4645679.70\nL1-0002,615192.76,4645681.13\n", encoding="utf-8")
+    reference.write_text("101,615190.23,4645679.7\n102,615192.76,4645681.13\n", encoding="utf-8")
+    result = analyse({"reference_path": reference, "target_path": target, "shot_interval_m": 3.125})
+    assert result["ok"] and result["correction"]["safe"]
+    assert [r["corrected_ffid"] for r in result["records"]] == ["101", "102"]
+    assert [r["target_ffid"] for r in result["records"]] == ["L1-0001", "L1-0002"]
 
 
 def test_text_identifier_does_not_become_numeric_ffid():

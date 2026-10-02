@@ -1,7 +1,11 @@
-"""Structured JSON boundary for the existing ShotLogFixer engine.
+"""Structured JSON boundary for the ShotLogFixer engine.
 
-The Electron main process talks to this module over stdin/stdout.  Domain
-logic remains in the parser, matcher, QC, and report modules.
+The Electron main process talks to this module over stdin/stdout.  Domain logic stays in the alignment, QC,
+correction and report modules; this module only validates requests and serialises results.
+
+Roles: the *reference* input is the authoritative recorder log; the *target* input is the EIVA/navigation log that is
+corrected.  Requests use ``reference_*`` / ``target_*`` keys; the former ``recorder_*`` / ``eiva_*`` keys are accepted
+as aliases.  The format-profile slots keep their stored names (RECORDER = reference, EIVA = target).
 """
 
 from __future__ import annotations
@@ -11,20 +15,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .correction import (CorrectionNotValidatedError, prepare_correction, save_fixed_eiva,
-                         save_fixed_pair, sha256_file)
-from .analysis_parameters import AnalysisParameters, AnalysisConfiguration
-from .gap_analysis import analyse_recorder_gaps
-from .matcher import match_records
-from .parsers import parse_eiva, parse_recorder
+from .analysis import Analysis, InputError, row_confidence, run_analysis
+from .analysis_parameters import AnalysisConfiguration, AnalysisParameters
+from .correction import CorrectionNotValidatedError, sha256_file
 from .format_detection import detect_file
-from .format_profiles import FormatProfile
-from .format_profiles import ProfileStore, builtin_profiles
+from .format_profiles import FormatProfile, INPUT_TYPE_FOR_ROLE, ProfileStore, builtin_profiles
+from .models import ASSIGNED, INFO, INVALID, NO_SHOT, SEVERE, WARNING
 from .profile_validation import validate_profile
+from .qc import summarise
+from .report import export_txt
 from .table_parser import parse_table
-from .qc import ffid_discontinuities, total_issue_count
-from .report import export_csv, export_txt
 from .version import __version__
+
+REFERENCE_INPUT, TARGET_INPUT = INPUT_TYPE_FOR_ROLE["REFERENCE"], INPUT_TYPE_FOR_ROLE["TARGET"]
 
 
 def _error(code: str, message: str, detail: str | None = None) -> dict[str, Any]:
@@ -37,48 +40,13 @@ def _error(code: str, message: str, detail: str | None = None) -> dict[str, Any]
 def _validate_file(value: Any, label: str) -> Path | dict[str, Any]:
     if isinstance(value, Path): value = str(value)
     if not isinstance(value, str) or not value.strip():
-        return _error(f"MISSING_{label.upper()}_FILE", f"Select an {label} file.")
+        return _error(f"MISSING_{label.upper()}_FILE", f"Select a {label} file.")
     path = Path(value).expanduser()
     if not path.exists():
         return _error("FILE_NOT_FOUND", f"The selected {label} file does not exist.", str(path))
     if not path.is_file():
         return _error("PATH_NOT_FILE", f"The selected {label} path is not a file.", str(path))
     return path
-
-
-def _record_position(result: Any, eiva_records: list[Any], result_index: int) -> int:
-    if result.eiva_record:
-        for index, record in enumerate(eiva_records):
-            if record.source_line_number == result.eiva_record.source_line_number:
-                return index + 1
-    for later in range(result_index + 1, len(eiva_records)):
-        if eiva_records[later].source_line_number == getattr(result.eiva_record, "source_line_number", None):
-            return later + 1
-    for index in range(result_index - 1, -1, -1):
-        if index < len(eiva_records):
-            return index + 1
-    return min(result_index + 1, len(eiva_records)) if eiva_records else 0
-
-
-def _serialize_result(result: Any, eiva_records: list[Any], index: int) -> dict[str, Any]:
-    eiva = result.eiva_record
-    recorder = result.recorder_record
-    return {
-        "id": f"result-{index + 1}",
-        "result_index": index,
-        "acquisition_position": _record_position(result, eiva_records, index),
-        "eiva_ffid": eiva.original_ffid if eiva else None,
-        "recorder_ffid": recorder.ffid if recorder else None,
-        "eiva_easting": eiva.easting_spark if eiva else None,
-        "eiva_northing": eiva.northing_spark if eiva else None,
-        "recorder_x": recorder.source_x if recorder else None,
-        "recorder_y": recorder.source_y if recorder else None,
-        "distance_m": result.distance_m,
-        "status": result.status,
-        "diagnostic": result.diagnostic,
-        "gap_event_ids": result.gap_event_ids,
-        "eiva_values": dict(eiva.original_values_by_column) if eiva else {},
-    }
 
 
 def _parameters(value: Any) -> AnalysisParameters | dict[str, Any]:
@@ -124,15 +92,23 @@ def _format_payload(profile, header_columns=None):
     return data
 
 
-def _check_expected_hashes(eiva, recorder, expected):
+def _check_expected_hashes(reference, target, expected):
     if not expected: return None
-    if expected.get("eiva") != sha256_file(eiva) or expected.get("recorder") != sha256_file(recorder):
+    if (expected.get("reference", expected.get("recorder")) != sha256_file(reference)
+            or expected.get("target", expected.get("eiva")) != sha256_file(target)):
         return _error("INPUT_CHANGED", "Input file changed — format and analysis must be revalidated.")
     return None
 
 
+def _first(payload: dict, *names):
+    for name in names:
+        if payload.get(name) is not None:
+            return payload[name]
+    return None
+
+
 def detect_format(path_value: Any, input_type: str):
-    path = _validate_file(path_value, input_type.lower())
+    path = _validate_file(path_value, "reference" if input_type == REFERENCE_INPUT else "target")
     if isinstance(path, dict): return path
     try:
         profile, metadata, text = detect_file(path, input_type)
@@ -156,7 +132,7 @@ def detect_format(path_value: Any, input_type: str):
 
 
 def preview_format(path_value: Any, input_type: str, profile_data=None):
-    path = _validate_file(path_value, input_type.lower())
+    path = _validate_file(path_value, "reference" if input_type == REFERENCE_INPUT else "target")
     if isinstance(path, dict): return path
     profile, failure = _resolve_profile(path, input_type, profile_data)
     if failure: return failure
@@ -194,178 +170,165 @@ def profiles_action(action, profile_data=None, name=None, profile_id=None):
     return _error("INVALID_PROFILE_ACTION", "Unsupported format profile action.")
 
 
-def analyse(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None) -> dict[str, Any]:
-    parameters = _parameters(shot_interval_m)
-    if isinstance(parameters, dict): return parameters
-    eiva = _validate_file(eiva_path, "EIVA")
-    if isinstance(eiva, dict):
-        return eiva
-    recorder = _validate_file(recorder_path, "recorder")
-    if isinstance(recorder, dict):
-        return recorder
-    eiva_profile, failure = _resolve_profile(eiva, "EIVA", eiva_profile_data)
-    if failure: return failure
-    recorder_profile, failure = _resolve_profile(recorder, "RECORDER", recorder_profile_data)
-    if failure: return failure
-    try:
-        eiva_records = parse_eiva(eiva, eiva_profile)
-    except PermissionError as exc:
-        return _error("EIVA_PERMISSION_DENIED", "Unable to open the selected EIVA log.", str(exc))
-    except (OSError, ValueError) as exc:
-        return _error("INVALID_EIVA_FILE", "Unable to parse the selected EIVA log.", str(exc))
-    try:
-        recorder_records = parse_recorder(recorder, recorder_profile)
-    except PermissionError as exc:
-        return _error("RECORDER_PERMISSION_DENIED", "Unable to open the selected recorder log.", str(exc))
-    except (OSError, ValueError) as exc:
-        return _error("INVALID_RECORDER_FILE", "Unable to parse the selected recorder log.", str(exc))
+# ------------------------------------------------------------------------------------------------------
+# Reconciliation
+# ------------------------------------------------------------------------------------------------------
 
+def prepare_analysis(payload: dict, *, needs_hashes: bool = False):
+    """Validate a reconciliation request and run the analysis.  Returns (Analysis, None) or (None, error)."""
+    parameters = _parameters(payload.get("shot_interval_m"))
+    if isinstance(parameters, dict): return None, parameters
+    reference = _validate_file(_first(payload, "reference_path", "recorder_path"), "reference")
+    if isinstance(reference, dict): return None, reference
+    target = _validate_file(_first(payload, "target_path", "eiva_path"), "target")
+    if isinstance(target, dict): return None, target
+    if needs_hashes:
+        changed = _check_expected_hashes(reference, target, payload.get("expected_hashes"))
+        if changed: return None, changed
+    reference_profile, failure = _resolve_profile(reference, REFERENCE_INPUT, _first(payload, "reference_profile", "recorder_profile"))
+    if failure: return None, failure
+    target_profile, failure = _resolve_profile(target, TARGET_INPUT, _first(payload, "target_profile", "eiva_profile"))
+    if failure: return None, failure
     try:
-        bundle = prepare_correction(eiva, recorder, parameters, eiva_profile, recorder_profile)
+        return run_analysis(reference, target, parameters, reference_profile, target_profile), None
+    except InputError as exc:
+        label = "reference" if exc.role == "REFERENCE" else "target"
+        if exc.kind == "PERMISSION":
+            return None, _error(f"{exc.role}_PERMISSION_DENIED", f"Unable to open the selected {label} file.", str(exc))
+        return None, _error(f"INVALID_{exc.role}_FILE", f"Unable to parse the selected {label} file.", str(exc))
+    except CorrectionNotValidatedError as exc:
+        return None, _error("INPUT_CHANGED", "Input file changed — format and analysis must be revalidated.", str(exc))
     except (OSError, ValueError) as exc:
-        return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
-    results = bundle.results
-    counts = {status: sum(result.status == status for result in results) for status in (
-        "MATCHED", "EIVA_ONLY", "NO_SHOT", "RECORDER_INVALID", "REVIEW"
-    )}
-    # A resolved NO_SHOT appears once as a recorder event; unresolved windows
-    # remain visible as REVIEW records and therefore remain counted separately.
-    summary = {
-        "eiva_rows": len(eiva_records),
-        "recorder_rows": len(recorder_records),
-        "matched": counts["MATCHED"],
-        "eiva_only": counts["EIVA_ONLY"],
-        "recorder_invalid": counts["RECORDER_INVALID"],
-        "review": counts["REVIEW"],
-        "total_issues": total_issue_count(results),
+        return None, _error("ANALYSIS_FAILED", "Unable to reconcile the two files.", str(exc))
+
+
+def _serialize_row(row, parameters) -> dict[str, Any]:
+    ref, tgt, pair = row.reference, row.target, row.pair
+    messages = [f.message for f in row.findings[:2]]
+    return {
+        "id": row.id,
+        "acquisition_position": row.position,
+        "association": row.association,
+        "reference_ffid": ref.original_ffid if ref else None,
+        "reference_line": ref.source_line_number if ref else None,
+        "reference_x": ref.x if ref else None,
+        "reference_y": ref.y if ref else None,
+        "target_ffid": tgt.original_ffid if tgt else None,
+        "target_line": tgt.source_line_number if tgt else None,
+        "target_x": tgt.x if tgt else None,
+        "target_y": tgt.y if tgt else None,
+        "corrected_ffid": row.corrected_ffid,
+        "distance_m": pair.distance_m if pair else None,
+        "basis": pair.basis if pair else None,
+        "confidence": row_confidence(row, parameters),
+        "qc_severity": row.qc_severity or "OK",
+        "qc_codes": list(dict.fromkeys(f.code for f in row.findings)),
+        "diagnostic": " | ".join(messages),
+        "target_values": tgt.values_by_column() if tgt else {},
     }
-    if shot_interval_m != 2.0:
-        summary.update({"recorder_gap_count": len(bundle.recorder_gaps),
-                        "unexplained_missing_positions": sum(g.unexplained_missing_positions for g in bundle.recorder_gaps)})
-    if counts["NO_SHOT"]:
-        summary["no_shot"] = counts["NO_SHOT"]
-    validation = bundle.validation.as_dict() if bundle.validation else {"passed": False, "errors": ["missing validation"]}
-    eiva_headers = list(eiva_records[0].original_values_by_column) if eiva_records else []
-    recorder_headers = list(recorder_records[0].header_fields) if recorder_records and getattr(recorder_records[0], "header_fields", None) else []
-    configuration = AnalysisConfiguration(parameters, eiva_profile, recorder_profile)
+
+
+def _serialize_findings(analysis: Analysis) -> list[dict[str, Any]]:
+    owner = {id(f): row.id for row in analysis.rows for f in row.findings}
+    return [{"scope": f.scope, "code": f.code, "severity": f.severity, "message": f.message,
+             "reference_row": f.reference_row, "target_row": f.target_row, "row_id": owner.get(id(f)),
+             "metrics": f.metrics or {}} for f in analysis.findings]
+
+
+def _summary(analysis: Analysis) -> dict[str, Any]:
+    reference, target, plan, alignment = analysis.reference, analysis.target, analysis.plan, analysis.alignment
+    qc = summarise(analysis.findings)["by_severity"]
+    severities = [row.qc_severity for row in analysis.rows if row.association == ASSIGNED]
+    return {
+        "reference_rows": len(reference),
+        "reference_valid": alignment.reference_valid,
+        "reference_no_shot": sum(r.classification == NO_SHOT for r in reference),
+        "reference_invalid": sum(r.classification == INVALID for r in reference),
+        "target_rows": len(target),
+        "target_invalid": sum(t.classification == INVALID for t in target),
+        "assigned": len(alignment.associations),
+        "target_only": plan.target_only_removed,
+        "invalid_target_removed": plan.invalid_target_removed,
+        "blocked": len(alignment.unplaced_reference_rows),
+        "corrected_rows": plan.corrected_rows,
+        "expected_rows": plan.expected_rows,
+        "qc_info": qc.get(INFO, 0), "qc_warning": qc.get(WARNING, 0), "qc_severe": qc.get(SEVERE, 0),
+        "assigned_with_warning": sum(s == WARNING for s in severities),
+        "assigned_with_severe": sum(s == SEVERE for s in severities),
+    }
+
+
+def analyse_response(analysis: Analysis) -> dict[str, Any]:
+    parameters, plan = analysis.parameters, analysis.plan
+    target_headers = list(analysis.target[0].columns) if analysis.target else []
+    reference_headers = list(analysis.reference[0].columns) if analysis.reference else []
+    configuration = AnalysisConfiguration(parameters, analysis.reference_profile, analysis.target_profile)
+    findings = _serialize_findings(analysis)
+    ffid_jumps = [{"from": f["metrics"].get("from"), "to": f["metrics"].get("to"), "kind": f["metrics"].get("kind"), "row_id": f["row_id"]}
+                  for f in findings if f["code"] == "RECORDER_FFID_DISCONTINUITY"]
     return {
         "ok": True,
-        "summary": summary,
+        "summary": _summary(analysis),
         "parameters": parameters.as_dict(),
         "analysis_configuration": configuration.as_dict(),
-        "recorder_gaps": [gap.as_dict() for gap in bundle.recorder_gaps],
         "correction": {
-            "safe": bundle.plan.safe_to_build,
-            "retained": bundle.plan.matched_count,
-            "eiva_only_removed": bundle.plan.dropped_eiva_only_count,
-            "no_shot_removed": bundle.plan.dropped_no_shot_count,
-            "blocking_reasons": bundle.plan.blocking_reasons,
-            "actions": [{"action": action.action_type, "eiva_ffid": action.original_eiva_ffid,
-                         "target_ffid": action.target_ffid, "recorder_ffid": action.recorder_ffid,
-                         "eiva_source_index": action.eiva_source_index,
-                         "recorder_source_index": action.recorder_source_index,
-                         "status": action.status, "reason": action.reason,
-                         "distance_m": action.coordinate_distance_m, "gap_event_id": action.gap_event_id} for action in bundle.plan.actions],
+            "safe": plan.safe_to_build and analysis.validation.passed,
+            "blockers": [{"code": b.code, "message": b.message} for b in plan.blockers],
+            "assigned": plan.assigned,
+            "target_only_removed": plan.target_only_removed,
+            "invalid_target_removed": plan.invalid_target_removed,
+            "corrected_rows": plan.corrected_rows,
+            "expected_rows": plan.expected_rows,
+            "direction": analysis.alignment.direction,
         },
-        "validation": validation,
-        "input_hashes": bundle.input_hashes,
-        "input_formats": {"eiva": _format_payload(eiva_profile, eiva_headers), "recorder": _format_payload(recorder_profile, recorder_headers)},
-        "ffid_jumps": [{"from": before, "to": after} for before, after in ffid_discontinuities(eiva_records)],
-        "eiva_headers": list(eiva_records[0].original_values_by_column) if eiva_records else [],
-        "records": [_serialize_result(result, eiva_records, index) for index, result in enumerate(results)],
+        "validation": analysis.validation.as_dict(),
+        "qc": {"summary": summarise(analysis.findings), "findings": findings, "ffid_jumps": ffid_jumps},
+        "input_hashes": analysis.input_hashes,
+        "input_formats": {"reference": _format_payload(analysis.reference_profile, reference_headers),
+                          "target": _format_payload(analysis.target_profile, target_headers)},
+        "target_headers": target_headers,
+        "records": [_serialize_row(row, parameters) for row in analysis.rows],
     }
 
 
-def _prepare_for_save(eiva_path: Any, recorder_path: Any, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None):
-    parameters = _parameters(shot_interval_m)
-    if isinstance(parameters, dict): return parameters
-    eiva = _validate_file(eiva_path, "EIVA")
-    if isinstance(eiva, dict): return eiva
-    recorder = _validate_file(recorder_path, "recorder")
-    if isinstance(recorder, dict): return recorder
-    eiva_profile, failure = _resolve_profile(eiva, "EIVA", eiva_profile_data)
+def analyse(payload: dict[str, Any]) -> dict[str, Any]:
+    analysis, failure = prepare_analysis(payload)
+    return failure if failure else analyse_response(analysis)
+
+
+def save_corrected_target(payload: dict[str, Any]) -> dict[str, Any]:
+    analysis, failure = prepare_analysis(payload, needs_hashes=True)
     if failure: return failure
-    recorder_profile, failure = _resolve_profile(recorder, "RECORDER", recorder_profile_data)
+    output_path = payload.get("output_path")
+    if not isinstance(output_path, str) or not output_path.strip():
+        return _error("MISSING_OUTPUT_PATH", "Choose a destination for the corrected target copy.")
+    try:
+        output = analysis.save_corrected(output_path, bool(payload.get("overwrite")))
+    except FileExistsError as exc: return _error("OUTPUT_EXISTS", "The corrected output already exists; confirm overwrite.", str(exc))
+    except (CorrectionNotValidatedError, OSError, ValueError) as exc: return _error("SAVE_BLOCKED", "The corrected copy was not written.", str(exc))
+    return {"ok": True, "path": str(output), "rows": analysis.plan.corrected_rows, "validation": analysis.validation.as_dict(),
+            "profile_hashes": {"reference": analysis.reference_profile.profile_hash, "target": analysis.target_profile.profile_hash},
+            "raw_hashes_after": {"reference": sha256_file(analysis.reference_path), "target": sha256_file(analysis.target_path)}}
+
+
+def export_qc(payload: dict[str, Any]) -> dict[str, Any]:
+    analysis, failure = prepare_analysis(payload, needs_hashes=True)
     if failure: return failure
-    try:
-        return prepare_correction(eiva, recorder, parameters, eiva_profile, recorder_profile)
-    except (OSError, ValueError) as exc:
-        return _error("CORRECTION_FAILED", "Unable to build the correction plan.", str(exc))
-
-
-def save_eiva(eiva_path: Any, recorder_path: Any, output_path: Any, overwrite: bool = False, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None, expected_hashes=None) -> dict[str, Any]:
-    eiva_check, recorder_check = _validate_file(eiva_path, "EIVA"), _validate_file(recorder_path, "recorder")
-    if isinstance(eiva_check, dict): return eiva_check
-    if isinstance(recorder_check, dict): return recorder_check
-    changed = _check_expected_hashes(eiva_check, recorder_check, expected_hashes)
-    if changed: return changed
-    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m, eiva_profile_data, recorder_profile_data)
-    if isinstance(bundle, dict): return bundle
-    if not isinstance(output_path, str) or not output_path.strip(): return _error("MISSING_OUTPUT_PATH", "Choose a fixed EIVA destination.")
-    try:
-        output = save_fixed_eiva(bundle, output_path, [Path(eiva_path), Path(recorder_path)], overwrite)
-    except FileExistsError as exc: return _error("OUTPUT_EXISTS", "The fixed EIVA output already exists; confirm overwrite.", str(exc))
-    except (CorrectionNotValidatedError, OSError, ValueError) as exc: return _error("SAVE_BLOCKED", "The fixed EIVA file was not written.", str(exc))
-    return {"ok": True, "path": str(output), "rows": bundle.validation.fixed_eiva_count, "validation": bundle.validation.as_dict(), "profile_hashes": {"eiva": bundle.eiva_profile.profile_hash, "recorder": bundle.recorder_profile.profile_hash}, "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
-
-
-def save_pair(eiva_path: Any, recorder_path: Any, eiva_output: Any, recorder_output: Any, overwrite: bool = False, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None, expected_hashes=None) -> dict[str, Any]:
-    eiva_check, recorder_check = _validate_file(eiva_path, "EIVA"), _validate_file(recorder_path, "recorder")
-    if isinstance(eiva_check, dict): return eiva_check
-    if isinstance(recorder_check, dict): return recorder_check
-    changed = _check_expected_hashes(eiva_check, recorder_check, expected_hashes)
-    if changed: return changed
-    bundle = _prepare_for_save(eiva_path, recorder_path, shot_interval_m, eiva_profile_data, recorder_profile_data)
-    if isinstance(bundle, dict): return bundle
-    if not isinstance(eiva_output, str) or not eiva_output.strip() or not isinstance(recorder_output, str) or not recorder_output.strip():
-        return _error("MISSING_OUTPUT_PATH", "Choose destinations for both fixed pair files.")
-    try:
-        outputs = save_fixed_pair(bundle, eiva_output, recorder_output, [Path(eiva_path), Path(recorder_path)], overwrite)
-    except FileExistsError as exc: return _error("OUTPUT_EXISTS", "A fixed pair output already exists; confirm overwrite.", str(exc))
-    except (CorrectionNotValidatedError, OSError, ValueError) as exc: return _error("SAVE_BLOCKED", "The fixed pair was not written.", str(exc))
-    return {"ok": True, "eiva_path": str(outputs[0]), "recorder_path": str(outputs[1]), "rows": bundle.validation.fixed_eiva_count,
-            "validation": bundle.validation.as_dict(), "profile_hashes": {"eiva": bundle.eiva_profile.profile_hash, "recorder": bundle.recorder_profile.profile_hash}, "raw_hashes_after": {"eiva": sha256_file(eiva_path), "recorder": sha256_file(recorder_path)}}
-
-
-def export_qc(eiva_path: Any, recorder_path: Any, output_path: Any, shot_interval_m: Any = None, eiva_profile_data=None, recorder_profile_data=None, expected_hashes=None) -> dict[str, Any]:
-    parameters = _parameters(shot_interval_m)
-    if isinstance(parameters, dict): return parameters
-    eiva = _validate_file(eiva_path, "EIVA")
-    if isinstance(eiva, dict):
-        return eiva
-    recorder = _validate_file(recorder_path, "recorder")
-    if isinstance(recorder, dict):
-        return recorder
-    changed = _check_expected_hashes(eiva, recorder, expected_hashes)
-    if changed: return changed
+    output_path = payload.get("output_path")
     if not isinstance(output_path, str) or not output_path.strip():
         return _error("MISSING_EXPORT_PATH", "Choose a destination for the QC TXT.")
     output = Path(output_path).expanduser()
+    reference_headers = list(analysis.reference[0].columns) if analysis.reference else []
+    target_headers = list(analysis.target[0].columns) if analysis.target else []
     try:
-        eiva_profile, failure = _resolve_profile(eiva, "EIVA", eiva_profile_data)
-        if failure: return failure
-        recorder_profile, failure = _resolve_profile(recorder, "RECORDER", recorder_profile_data)
-        if failure: return failure
-        eiva_records, recorder_records = parse_eiva(eiva, eiva_profile), parse_recorder(recorder, recorder_profile)
-        raw_results = match_records(eiva_records, recorder_records, parameters)
-        gaps = analyse_recorder_gaps(eiva_records, recorder_records, raw_results, parameters)
-        # `.txt` is the product format. Keep `.csv` as a legacy direct-API
-        # compatibility path for existing integrations, never selected by the UI.
-        if output.suffix.lower() == ".csv":
-            export_csv(output, raw_results)
-        else:
-            # Export the same resolved records and gap attribution the operator
-            # reviewed; retain the legacy raw CSV API above for integrations.
-            bundle = prepare_correction(eiva, recorder, parameters, eiva_profile, recorder_profile)
-            raw_results, gaps = bundle.results, bundle.recorder_gaps
-            eiva_headers = list(eiva_records[0].original_values_by_column) if eiva_records else []
-            recorder_headers = list(recorder_records[0].header_fields) if recorder_records and getattr(recorder_records[0], "header_fields", None) else []
-            export_txt(output, raw_results, parameters, gaps, {"eiva": _format_payload(eiva_profile, eiva_headers), "recorder": _format_payload(recorder_profile, recorder_headers)})
+        export_txt(output, analysis, {"reference": _format_payload(analysis.reference_profile, reference_headers),
+                                      "target": _format_payload(analysis.target_profile, target_headers)})
     except PermissionError as exc:
         return _error("EXPORT_PERMISSION_DENIED", "Unable to write the QC TXT file.", str(exc))
     except (OSError, ValueError) as exc:
         return _error("EXPORT_FAILED", "Unable to export the QC TXT file.", str(exc))
-    return {"ok": True, "path": str(output), "rows": len(raw_results), "parameters": parameters.as_dict(), "recorder_gap_count": len(gaps)}
+    return {"ok": True, "path": str(output), "rows": len(analysis.rows), "parameters": analysis.parameters.as_dict(),
+            "qc_findings": len(analysis.findings)}
 
 
 def dispatch(payload: dict[str, Any]) -> dict[str, Any]:
@@ -377,13 +340,11 @@ def dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     if action in {"list_profiles", "save_profile", "delete_profile"}:
         return profiles_action(action, payload.get("profile"), payload.get("name"), payload.get("profile_id"))
     if action == "analyse":
-        return analyse(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"))
+        return analyse(payload)
     if action in {"export", "export_qc"}:
-        return export_qc(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"), payload.get("expected_hashes"))
-    if action == "save_fixed_eiva":
-        return save_eiva(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("output_path"), bool(payload.get("overwrite")), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"), payload.get("expected_hashes"))
-    if action == "save_fixed_pair":
-        return save_pair(payload.get("eiva_path"), payload.get("recorder_path"), payload.get("eiva_output"), payload.get("recorder_output"), bool(payload.get("overwrite")), payload.get("shot_interval_m"), payload.get("eiva_profile"), payload.get("recorder_profile"), payload.get("expected_hashes"))
+        return export_qc(payload)
+    if action in {"save_corrected_target", "save_fixed_eiva"}:
+        return save_corrected_target(payload)
     return _error("UNKNOWN_ACTION", f"Unsupported engine action: {action}")
 
 

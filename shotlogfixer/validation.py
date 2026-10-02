@@ -1,182 +1,88 @@
-"""Independent source-mapping and exact serialized engineering-pair validation."""
+"""Independent structural validation of a corrected copy.
 
-from collections import Counter
-import math
-import re
-import statistics
+These checks establish that the corrected copy is a faithful, internally consistent product of the alignment: the FFIDs
+come from the reference, nothing but the FFID field changed, the file structure survived, and the assignment is
+one-to-one and order preserving.  They contain no distance or tolerance test: spatial observations are QC, and QC never
+decides whether a corrected copy may be written.
+"""
 
-from config import INVALID_COORDINATE
-from .analysis_parameters import AnalysisParameters
-from .gap_analysis import validate_gap_events
-from .models import CorrectionPlan, EivaRecord, MatchResult, RecorderRecord, ValidationResult
-from .parsers import classify_recorder_row, parse_eiva_text, parse_recorder_text
+from dataclasses import dataclass, field
+from typing import Any, Sequence
 
-
-def _duplicates(values):
-    return sorted(str(value) for value, count in Counter(values).items() if count > 1)
-
-
-def _distances(result, pairs, parameters: AnalysisParameters):
-    distances = []
-    for eiva, recorder in pairs:
-        if recorder.source_x is None or recorder.source_y is None:
-            result.invalid_rows_remaining += 1
-            continue
-        distance = math.hypot(eiva.easting_spark - recorder.source_x,
-                              eiva.northing_spark - recorder.source_y)
-        if not math.isfinite(distance):
-            result.invalid_rows_remaining += 1
-            continue
-        distances.append(distance)
-        if distance <= parameters.match_tolerance_m:
-            result.coordinate_pass_count += 1
-        else:
-            result.above_tolerance_count += 1
-    if distances:
-        result.max_distance_m = max(distances)
-        result.mean_distance_m = statistics.mean(distances)
-        result.median_distance_m = statistics.median(distances)
+from .alignment import AlignmentResult
+from .canonical_mapping import parse_canonical
+from .correction import KEEP_AND_RENUMBER, CorrectionPlan
+from .models import SourceRecord, VALID
+from .table_parser import parse_table
 
 
-def validate_serialized(eiva_text: str, recorder_text: str, parameters: AnalysisParameters | None = None, eiva_profile=None, recorder_profile=None) -> ValidationResult:
-    parameters = parameters or AnalysisParameters(2.0)
-    result = ValidationResult(False)
-    result.shot_interval_m, result.match_tolerance_m = parameters.shot_interval_m, parameters.match_tolerance_m
+@dataclass
+class ValidationResult:
+    passed: bool = False
+    errors: list[str] = field(default_factory=list)
+    corrected_rows: int = 0
+    expected_rows: int = 0
+    ffid_changed: int = 0
+    ffid_unchanged: int = 0
+    checks: dict[str, bool] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"passed": self.passed, "errors": self.errors, "corrected_rows": self.corrected_rows,
+                "expected_rows": self.expected_rows, "ffid_changed": self.ffid_changed,
+                "ffid_unchanged": self.ffid_unchanged, "checks": self.checks}
+
+
+def validate_corrected_copy(original_text: str, corrected_text: str, reference: Sequence[SourceRecord],
+                            target: Sequence[SourceRecord], alignment: AlignmentResult, plan: CorrectionPlan,
+                            profile) -> ValidationResult:
+    result = ValidationResult(expected_rows=plan.expected_rows)
+    kept = [a for a in plan.actions if a.action == KEEP_AND_RENUMBER]
+    reference_rows = [a.reference_row for a in kept]
+    target_rows = [a.target_row for a in kept]
+    checks = result.checks
+    checks["one_to_one"] = len(set(reference_rows)) == len(reference_rows) and len(set(target_rows)) == len(target_rows)
+    checks["order_preserved"] = (all(a < b for a, b in zip(reference_rows, reference_rows[1:]))
+                                 and all(a < b for a, b in zip(target_rows, target_rows[1:])))
+    checks["only_valid_reference_records"] = all(reference[r].classification == VALID for r in reference_rows)
+    checks["every_valid_reference_record_assigned"] = alignment.complete and len(kept) == plan.reference_valid
     try:
-        eiva = parse_eiva_text(eiva_text, eiva_profile)
-        recorder = parse_recorder_text(recorder_text, recorder_profile)
-    except (ValueError, IndexError) as exc:
-        result.errors.append(f"Serialized candidate could not be parsed: {exc}")
+        output = parse_canonical(corrected_text, profile)
+        original_table, corrected_table = parse_table(original_text, profile), parse_table(corrected_text, profile)
+    except ValueError as exc:
+        result.errors.append(f"The corrected copy cannot be parsed with the target format: {exc}")
+        result.checks.update({"row_count": False, "ffids_from_reference": False, "unrelated_fields_unchanged": False,
+                              "structure_preserved": False})
         return result
-    result.fixed_eiva_count, result.fixed_recorder_count = len(eiva), len(recorder)
-    result.ffid_pair_count = min(len(eiva), len(recorder))
-    eids, rids = [row.original_ffid for row in eiva], [row.ffid for row in recorder]
-    result.ffid_match_count = sum(a == b for a, b in zip(eids, rids))
-    result.duplicate_ffids = sorted(set(_duplicates(eids) + _duplicates(rids)))
-    result.missing_ffids = list((Counter(rids) - Counter(eids)).elements())
-    result.extra_ffids = list((Counter(eids) - Counter(rids)).elements())
-    result.no_shot_rows_remaining = sum(classify_recorder_row(row) == "NO_SHOT" for row in recorder)
-    result.invalid_rows_remaining = sum(classify_recorder_row(row) == "INVALID" for row in recorder)
-    for row in eiva:
-        if eiva_profile:
-            coordinate_values = [row.original_fields[eiva_profile.mapping[role]] for role in ("EIVA_EASTING", "EIVA_NORTHING")]
-        else:
-            values = {key.lower(): value for key, value in row.original_values_by_column.items()}
-            coordinate_values = [values[name] for name in ("e(spark)", "n(spark)")]
-        for value in coordinate_values:
-            if not re.fullmatch(r"[+-]?\d+\.\d{2}", value.strip()): result.errors.append(f"EIVA line {row.source_line_number}: coordinates are not two decimals")
-        if row.easting_spark == INVALID_COORDINATE or row.northing_spark == INVALID_COORDINATE:
-            result.no_shot_rows_remaining += 1
-    for row in recorder:
-        indices = [recorder_profile.mapping[r] for r in ("RECORDER_X", "RECORDER_Y")] if recorder_profile else [1, 2]
-        for value in (row.original_fields[i] for i in indices if i < len(row.original_fields)):
-            if not re.fullmatch(r"[+-]?\d+\.\d{2}", value):
-                result.errors.append(f"Recorder line {row.source_line_number}: coordinates are not two decimals")
-    _distances(result, zip(eiva, recorder), parameters)
-    if not eiva or not recorder: result.errors.append("Engineering pair must contain valid shots")
-    if len(eiva) != len(recorder): result.errors.append("Serialized row-count mismatch")
-    if result.ffid_match_count != len(eiva): result.errors.append("Serialized row-by-row FFID mismatch")
-    if result.duplicate_ffids: result.errors.append("Duplicate fixed FFIDs")
-    if any(not value.strip() for value in eids + rids): result.errors.append("Missing FFID value")
-    if result.missing_ffids or result.extra_ffids: result.errors.append("Missing or extra pair FFIDs")
-    if result.no_shot_rows_remaining: result.errors.append("NO_SHOT remains in engineering pair")
-    if result.invalid_rows_remaining: result.errors.append("Invalid coordinates remain in engineering pair")
-    if result.coordinate_pass_count != len(eiva): result.errors.append(f"Serialized coordinates fail the {parameters.match_tolerance_m:g} m tolerance")
-    result.passed = not result.errors
-    return result
-
-
-def validate_candidates(source_eiva: list[EivaRecord], source_recorder: list[RecorderRecord],
-                        plan: CorrectionPlan, eiva_text: str, recorder_text: str,
-                        results: list[MatchResult], parameters: AnalysisParameters | None = None,
-                        recorder_gaps=None, eiva_profile=None, recorder_profile=None) -> ValidationResult:
-    """Check original precision, coverage and provenance; then reparse final text."""
-    parameters = parameters or AnalysisParameters(2.0)
-    recorder_gaps = recorder_gaps or []
-    classes = [classify_recorder_row(row) for row in source_recorder]
-    valid_indices = [i for i, kind in enumerate(classes) if kind == "VALID"]
-    result = ValidationResult(False, len(source_eiva), len(source_recorder), len(valid_indices),
-                              classes.count("NO_SHOT"), classes.count("INVALID"),
-                              shot_interval_m=parameters.shot_interval_m, match_tolerance_m=parameters.match_tolerance_m)
-    result.errors.extend(plan.blocking_reasons)
-    if not plan.safe_to_build: result.errors.append("Correction plan is unsafe")
-    if result.invalid_recorder_count: result.errors.append("Source contains INVALID recorder rows")
-    result.unresolved_review_count = sum(row.status == "REVIEW" for row in results)
-    if result.unresolved_review_count: result.errors.append("Unresolved REVIEW rows")
-    if any(row.status == "NO_SHOT" and not row.eiva_record for row in results):
-        result.errors.append("Unresolved NO_SHOT rows")
-
-    keep = [action for action in plan.actions if action.action_type == "KEEP_AND_RENUMBER"]
-    eis, ris = [a.eiva_source_index for a in keep], [a.recorder_source_index for a in keep]
-    result.duplicate_source_mappings = _duplicates(eis) + _duplicates(ris)
-    if result.duplicate_source_mappings: result.errors.append("Duplicate retained source mapping")
-    all_eis = [a.eiva_source_index for a in plan.actions]
-    if sorted(i for i in all_eis if isinstance(i, int)) != list(range(len(source_eiva))):
-        result.errors.append("Plan does not cover each EIVA source row exactly once")
-    if sorted(i for i in ris if isinstance(i, int)) != valid_indices:
-        result.errors.append("Missing or extra valid recorder source mapping")
-    result.non_monotonic_mapping_count = sum(
-        not isinstance(a, int) or not isinstance(b, int) or b <= a
-        for indices in (eis, ris) for a, b in zip(indices, indices[1:]))
-    if result.non_monotonic_mapping_count: result.errors.append("Non-monotonic source mapping")
-    source_pairs = []
-    for action in keep:
-        ei, ri = action.eiva_source_index, action.recorder_source_index
-        if not isinstance(ei, int) or not isinstance(ri, int) or not (0 <= ei < len(source_eiva) and 0 <= ri < len(source_recorder)):
-            result.errors.append("Source mapping index outside input")
-            continue
-        eiva, recorder = source_eiva[ei], source_recorder[ri]
-        if action.original_eiva_ffid != eiva.original_ffid or action.target_ffid != recorder.ffid or action.recorder_ffid != recorder.ffid:
-            result.errors.append("Action FFID provenance mismatch")
-        if classes[ri] != "VALID": result.errors.append("Retained NO_SHOT or INVALID recorder row")
-        source_pairs.append((eiva, recorder))
-    _distances(result, source_pairs, parameters)
-    if result.coordinate_pass_count != len(keep): result.errors.append(f"Original coordinates fail the {parameters.match_tolerance_m:g} m tolerance")
-    if recorder_gaps:
-        result.errors.extend(validate_gap_events(source_eiva, source_recorder, results, recorder_gaps, parameters))
-    no_shot_ids = {row.ffid for row, kind in zip(source_recorder, classes) if kind == "NO_SHOT"}
-    if any(row.ffid in no_shot_ids for _, row in source_pairs): result.errors.append("NO_SHOT FFID retained")
-
-    serialized = validate_serialized(eiva_text, recorder_text, parameters, eiva_profile, recorder_profile)
-    result.errors.extend(serialized.errors)
-    result.fixed_eiva_count, result.fixed_recorder_count = serialized.fixed_eiva_count, serialized.fixed_recorder_count
-    result.ffid_pair_count, result.ffid_match_count = serialized.ffid_pair_count, serialized.ffid_match_count
-    result.duplicate_ffids = serialized.duplicate_ffids
-    result.no_shot_rows_remaining += serialized.no_shot_rows_remaining
-    result.invalid_rows_remaining += serialized.invalid_rows_remaining
-    expected_ids = [row.ffid for row in source_recorder if classify_recorder_row(row) == "VALID"]
-    try:
-        fixed_eiva, fixed_recorder = parse_eiva_text(eiva_text, eiva_profile), parse_recorder_text(recorder_text, recorder_profile)
-        actual_ids = [row.ffid for row in fixed_recorder]
-        result.missing_ffids = list((Counter(expected_ids) - Counter(actual_ids)).elements())
-        result.extra_ffids = list((Counter(actual_ids) - Counter(expected_ids)).elements())
-        if [row.original_ffid for row in fixed_eiva] != expected_ids or actual_ids != expected_ids:
-            result.errors.append("Engineering rows do not follow original valid recorder FFIDs/order")
-        if len(fixed_eiva) != len(valid_indices) or len(fixed_recorder) != len(valid_indices) or len(keep) != len(valid_indices):
-            result.errors.append("Fixed row count differs from expected VALID recorder count")
-        # Independently check original navigation measurements and unrelated field values.
-        for (original_eiva, original_recorder), output_eiva, output_recorder in zip(source_pairs, fixed_eiva, fixed_recorder):
-            if eiva_profile:
-                targeted = {eiva_profile.mapping[name] for name in ("FFID", "EIVA_EASTING", "EIVA_NORTHING")}
-                eiva_indices = eiva_profile.mapping
-            else:
-                header = [key.lower() for key in original_eiva.original_values_by_column]
-                targeted = {header.index(name) for name in ("ffid", "e(spark)", "n(spark)")}
-                eiva_indices = {"FFID": header.index("ffid"), "EIVA_EASTING": header.index("e(spark)"), "EIVA_NORTHING": header.index("n(spark)")}
-            if len(original_eiva.original_fields) != len(output_eiva.original_fields) or any(
-                original != fixed for i, (original, fixed) in enumerate(zip(original_eiva.original_fields, output_eiva.original_fields)) if i not in targeted):
-                result.errors.append("Unrelated EIVA fields changed")
-            if output_eiva.original_fields[eiva_indices["EIVA_EASTING"]].strip() != f"{original_eiva.easting_spark:.2f}" or output_eiva.original_fields[eiva_indices["EIVA_NORTHING"]].strip() != f"{original_eiva.northing_spark:.2f}":
-                result.errors.append("Original EIVA navigation coordinate was changed")
-            rec_indices = recorder_profile.mapping if recorder_profile else {"FFID": 0, "RECORDER_X": 1, "RECORDER_Y": 2}
-            rec_targeted = set(rec_indices.values())
-            if len(original_recorder.original_fields) != len(output_recorder.original_fields) or any(
-                original != fixed for i, (original, fixed) in enumerate(zip(original_recorder.original_fields, output_recorder.original_fields)) if i not in rec_targeted):
-                result.errors.append("Unrelated recorder fields or FFID changed")
-            if output_recorder.original_fields[rec_indices["RECORDER_X"]] != f"{original_recorder.source_x:.2f}" or output_recorder.original_fields[rec_indices["RECORDER_Y"]] != f"{original_recorder.source_y:.2f}":
-                result.errors.append("Original recorder coordinates were changed")
-    except (ValueError, IndexError, KeyError) as exc:
-        result.errors.append(f"Candidate provenance check failed: {exc}")
-    result.errors = list(dict.fromkeys(result.errors))
+    result.corrected_rows = len(output)
+    checks["row_count"] = len(output) == len(kept)
+    checks["row_count_equals_reference"] = len(output) == plan.expected_rows if alignment.complete else True
+    checks["ffids_from_reference"] = [o.original_ffid for o in output] == [a.corrected_ffid for a in kept]
+    ffid_index = profile.mapping["FFID"]
+    unrelated = len(output) == len(kept)
+    if unrelated:
+        for action, produced in zip(kept, output):
+            source = target[action.target_row]
+            if len(source.cells) != len(produced.cells) or any(
+                    a != b for i, (a, b) in enumerate(zip(source.cells, produced.cells)) if i != ffid_index):
+                unrelated = False
+                break
+    checks["unrelated_fields_unchanged"] = unrelated
+    checks["structure_preserved"] = (original_table.header == corrected_table.header and
+                                     [raw for _, raw in original_table.skipped_lines] == [raw for _, raw in corrected_table.skipped_lines])
+    result.ffid_changed = sum(a.original_ffid != a.corrected_ffid for a in kept)
+    result.ffid_unchanged = len(kept) - result.ffid_changed
+    messages = {
+        "one_to_one": "A reference record or target row is used more than once",
+        "order_preserved": "The assignment does not preserve acquisition order",
+        "only_valid_reference_records": "A reference record that is not valid was used as an FFID source",
+        "row_count": "The corrected copy does not contain exactly the assigned rows",
+        "row_count_equals_reference": "The corrected row count differs from the number of valid reference records",
+        "ffids_from_reference": "The corrected FFIDs are not the reference FFIDs, in reference order",
+        "unrelated_fields_unchanged": "A field other than the FFID differs from the source row",
+        "structure_preserved": "The header or the non-record lines of the target file changed",
+    }
+    for key, message in messages.items():
+        if not checks.get(key, True):
+            result.errors.append(message)
     result.passed = not result.errors
     return result

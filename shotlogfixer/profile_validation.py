@@ -10,10 +10,16 @@ def finite(value):
 
 
 def usable(cells, profile):
+    """A row is usable when its mapped coordinates are numeric.
+
+    The reference input's FFID is authoritative, so it must be an integer.  The target's own FFID is
+    only a diagnostic (the corrected copy overwrites it), so any text is acceptable there."""
     try:
         values = [cells[profile.mapping[role]] for role in ROLES[profile.input_type]]
-        ffid = finite(values[0])
-        return ffid is not None and ffid.is_integer() and all(finite(v) is not None for v in values[1:])
+        if profile.workflow_role == "REFERENCE":
+            ffid = finite(values[0])
+            if ffid is None or not ffid.is_integer(): return False
+        return all(finite(v) is not None for v in values[1:])
     except (IndexError, KeyError, TypeError, AttributeError): return False
 
 

@@ -10,6 +10,11 @@ import uuid
 
 ROLES = {"EIVA": ("FFID", "EIVA_EASTING", "EIVA_NORTHING"),
          "RECORDER": ("FFID", "RECORDER_X", "RECORDER_Y")}
+# A profile's ``input_type`` is a stored slot name that selects its column roles.  The reconciliation
+# workflow is asymmetric and keys off the workflow role instead: RECORDER profiles describe the
+# authoritative REFERENCE input, EIVA profiles the TARGET input being corrected.  Parsing is identical.
+WORKFLOW_ROLE = {"RECORDER": "REFERENCE", "EIVA": "TARGET"}
+INPUT_TYPE_FOR_ROLE = {role: input_type for input_type, role in WORKFLOW_ROLE.items()}
 DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t", "pipe": "|", "whitespace": None}
 
 
@@ -50,6 +55,10 @@ class FormatProfile:
     @property
     def mapping(self):
         return dict(self.column_mapping)
+
+    @property
+    def workflow_role(self):
+        return WORKFLOW_ROLE[self.input_type]
 
     def as_dict(self):
         from dataclasses import asdict
