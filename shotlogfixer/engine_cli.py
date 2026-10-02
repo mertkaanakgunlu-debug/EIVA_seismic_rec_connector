@@ -349,7 +349,16 @@ def dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     return _error("UNKNOWN_ACTION", f"Unsupported engine action: {action}")
 
 
+def _use_utf8_streams() -> None:
+    """Electron writes the request and reads the response as UTF-8; a Windows pipe defaults to the machine's ANSI code page."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
 def main() -> int:
+    _use_utf8_streams()
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
