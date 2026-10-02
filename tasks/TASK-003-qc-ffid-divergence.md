@@ -1,4 +1,4 @@
-# TASK-002 — QC finding for recorder/EIVA FFID divergence
+# TASK-003 — QC finding for recorder/EIVA FFID divergence
 
 ## Objective
 When the relationship between recorder FFIDs and the EIVA original FFIDs of their assigned rows changes along the line
@@ -14,7 +14,7 @@ target-only block.
 - Skip pairs where either FFID is not an integer (target FFIDs are free text by design).
 - Add the code's human label to `shotlogfixer/presentation.py` and `desktop/src/lib/presentation.ts` so the table and
   the QC TXT show a readable name.
-- Update the golden expectations from TASK-001 where this new code now appears (scenario 3 at minimum).
+- Update the golden expectations where this new code now appears (scenario 3 at minimum).
 
 ## Non-goals
 - The finding must not change any association, the corrected copy, or correction blockers (QC never feeds back).
@@ -30,7 +30,7 @@ target-only block.
 
 ## Acceptance criteria
 - Golden scenario 3 (recorder 104→105 while EIVA 104→207) reports exactly one `ASSOCIATION_FFID_OFFSET_CHANGE`, on
-  recorder FFID 105, and its assignments and corrected copy are unchanged from TASK-001.
+  recorder FFID 105, and its assignments and corrected copy are unchanged.
 - A line with a constant non-zero offset (e.g. recorder 1.., EIVA 11..) reports no such finding.
 - A target with non-integer FFIDs reports no such finding and no error.
 - `test_qc.py::test_running_qc_does_not_touch_the_alignment` and `test_correction.py::test_qc_cannot_change_the_correction`
@@ -42,4 +42,4 @@ target-only block.
 - Task completion: `python -m pytest`, and from `desktop/`: `npm run typecheck && npm run test`
 
 ## Dependencies
-TASK-001.
+TASK-001, TASK-002 (both edit `qc.py` and the golden expectations).

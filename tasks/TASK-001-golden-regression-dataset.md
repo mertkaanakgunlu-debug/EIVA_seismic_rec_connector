@@ -16,6 +16,8 @@ real-data test, `tests/test_real_sample.py`, skips when the files are absent).
   4. A single recorder coordinate spike that is still assigned and flagged by QC.
   5. Invalid and no-shot recorder rows (sentinel `-214748.36480`).
   6. Fewer EIVA rows than valid recorder records (correction blocker).
+  7. **Recorder-only shot**: one recorder shot has no EIVA row and a later EIVA row is duplicated. Pin today's
+     behaviour (a displaced run flagged `ASSOCIATION_RUN_DISPLACED`); TASK-002 changes this expectation.
 - `expected.json` per scenario records: the reference-FFID → target-original-FFID assignments, the corrected-copy FFID
   column, the set of QC codes with counts, and the correction blocker codes (empty when none).
 - Add `tests/test_golden.py`, parametrised over the scenario directories, that runs the engine through
@@ -34,7 +36,7 @@ real-data test, `tests/test_real_sample.py`, skips when the files are absent).
 - `docs/recorder-authority-model.md` for the expected semantics of each scenario.
 
 ## Acceptance criteria
-- Six scenario directories exist, each under 100 rows per input file, all committed.
+- Seven scenario directories exist, each under 100 rows per input file, all committed.
 - `python -m pytest tests/test_golden.py` passes on the baseline engine without any production code change.
 - Scenario 3 asserts explicitly that recorder FFID 105 is assigned to EIVA FFID 207 and that recorder FFIDs 101–104
   are assigned to EIVA FFIDs 101–104.

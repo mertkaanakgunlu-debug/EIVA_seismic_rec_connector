@@ -26,16 +26,17 @@ None.
 
 ## Queued tasks (in order)
 1. [TASK-001](tasks/TASK-001-golden-regression-dataset.md) — compact golden regression dataset (tests only).
-2. [TASK-002](tasks/TASK-002-qc-ffid-divergence.md) — explicit QC finding for FFID divergence. Depends on 001.
-3. [TASK-003](tasks/TASK-003-release-verification.md) — milestone release verification on Windows. Depends on 001, 002.
+2. [TASK-002](tasks/TASK-002-coordinate-beats-order.md) — stop order from overriding a clearly better coordinate
+   match (recorder-only shot instead of a displaced run). Depends on 001.
+3. [TASK-003](tasks/TASK-003-qc-ffid-divergence.md) — explicit QC finding for FFID divergence. Depends on 001, 002.
+4. [TASK-004](tasks/TASK-004-release-verification.md) — milestone release verification on Windows. Depends on 001–003.
 
-Strictly sequential: 002 updates 001's golden expectations, and 003 verifies both.
+Strictly sequential: 002 and 003 both edit `qc.py` and the golden expectations, and 004 verifies all.
 
 ## Known blockers / open decisions
-- **Verbatim Project Goal and Project Instructions not yet supplied**; PROJECT_GOAL.md / PROJECT_INSTRUCTIONS.md hold
-  only the CTO's bootstrap rules. Once supplied, check the baseline model (recorder authoritative; order is a hard
-  constraint that can place a run one row from the spatially nearest row, flagged by QC as
-  `ASSOCIATION_NEAREST_OVERRIDDEN` / `ASSOCIATION_RUN_DISPLACED`) against it; any conflict becomes a task.
+- **Known gap against the Goal**: order is a hard constraint, so a recorder shot missing from EIVA displaces a run of
+  associations one row off their physical shot (flagged only by QC). Addressed by TASK-002.
+- Verbatim Project Goal / Instructions text awaiting CTO confirmation before it is committed.
 - **Default branch is stale**: GitHub's default branch is `phase1-detection-qc` (`645a049`, 15 commits behind the
   baseline). Needs a CTO decision before TASK-003: fast-forward a `main` branch to the baseline and make it the default.
 - 13 superseded remote branches remain (all ancestors of the baseline); safe to delete once the default branch is fixed.

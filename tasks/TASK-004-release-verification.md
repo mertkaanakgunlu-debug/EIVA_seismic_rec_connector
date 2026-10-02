@@ -1,4 +1,4 @@
-# TASK-003 — Milestone release verification
+# TASK-004 — Milestone release verification
 
 ## Objective
 Verify that the accepted baseline builds and runs as the end-user product: full regression green and a portable
@@ -32,4 +32,4 @@ Windows build produced and launched.
 The full milestone set listed in Scope.
 
 ## Dependencies
-TASK-001, TASK-002, and the default-branch decision in PROJECT_STATUS.md (Blockers).
+TASK-001, TASK-002, TASK-003, and the default-branch decision in PROJECT_STATUS.md (Blockers).
