@@ -74,6 +74,8 @@ export interface CorrectionSummary {
   safe: boolean;
   blockers: CorrectionBlocker[];
   assigned: number;
+  /** Valid recorder records no target row could hold: absent from the corrected copy, never a blocker. */
+  reference_without_target: number;
   target_only_removed: number;
   invalid_target_removed: number;
   corrected_rows: number;

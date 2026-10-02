@@ -8,7 +8,7 @@ from shotlogfixer import engine_cli
 from shotlogfixer.presentation import ASSOCIATION_LABELS, qc_label
 from shotlogfixer.theme import get_theme
 
-GROUPS = (("TARGET_ONLY", "Target-only"), ("INVALID", "Invalid"), ("QC_SEVERE", "QC severe"), ("QC_WARNING", "QC warnings"))
+GROUPS = (("TARGET_ONLY", "Target-only"), ("INVALID", "Invalid"), ("BLOCKED", "Blocked"), ("QC_SEVERE", "QC severe"), ("QC_WARNING", "QC warnings"))
 TONES = {"ok": "matched", "warning": "review", "severe": "recorder_invalid", "target-only": "eiva_only", "invalid": "recorder_invalid"}
 
 
@@ -38,7 +38,8 @@ def group_indices(rows):
     groups = {key: [] for key, _ in GROUPS}
     for index, row in enumerate(rows):
         if row["association"] == "TARGET_ONLY": groups["TARGET_ONLY"].append(index)
-        elif row["association"] in ("INVALID", "NO_SHOT", "BLOCKED"): groups["INVALID"].append(index)
+        elif row["association"] in ("INVALID", "NO_SHOT"): groups["INVALID"].append(index)
+        elif row["association"] == "BLOCKED": groups["BLOCKED"].append(index)
         if row["qc_severity"] == "SEVERE": groups["QC_SEVERE"].append(index)
         elif row["qc_severity"] == "WARNING": groups["QC_WARNING"].append(index)
     return groups
@@ -193,7 +194,9 @@ class App(tk.Tk):
             count = len(self.groups[key])
             getattr(self, f"{key.lower()}_value").config(text=str(count)); getattr(self, f"{key.lower()}_position").config(text=f"{'1' if count else '0'} / {count}")
         state = "ready" if correction["safe"] else "BLOCKED: " + "; ".join(b["message"] for b in correction["blockers"])
-        self.metrics.config(text=f"Correction {state}   Corrected rows: {correction['corrected_rows']} / expected {correction['expected_rows']}   Target-only removed: {correction['target_only_removed']}   QC warnings never block the corrected copy.")
+        without = correction.get("reference_without_target", 0)
+        missing = f"   Recorder records without an EIVA row (not in the copy): {without}" if without else ""
+        self.metrics.config(text=f"Correction {state}   Corrected rows: {correction['corrected_rows']} of {correction['expected_rows']} recorder records   Target-only removed: {correction['target_only_removed']}{missing}   QC warnings never block the corrected copy.")
         self.nav_current = {}
 
     def _navigate(self, group, step):

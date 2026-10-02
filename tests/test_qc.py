@@ -1,12 +1,13 @@
 """QC findings: reported independently of the correction, never able to change it."""
 import copy
+import math
 
-from shotlogfixer.alignment import align_records
+from shotlogfixer.alignment import Association, AlignmentResult, align_records
 from shotlogfixer.analysis_parameters import AnalysisParameters
 from shotlogfixer.models import INFO, REFERENCE, SEVERE, TARGET, WARNING
 from shotlogfixer.qc import association_confidence, distance_band, run_qc, summarise, worst_severity
 
-from helpers import PARAMS, codes, qc_for, rec, reference_records, target_records
+from helpers import PARAMS, codes, qc_for, rec, target_records
 
 STEP = 3.125
 
@@ -168,16 +169,36 @@ def test_forced_placements_are_never_ambiguous_even_when_points_look_alike():
     assert not codes(findings, "ASSOCIATION_AMBIGUOUS")
 
 
+def placed_by_hand(ref, tgt, mapping):
+    """An alignment that puts reference row i on target row mapping[i]: QC must describe any alignment it is given."""
+    result = AlignmentResult(reference_valid=len(ref), target_rows=len(tgt))
+    for i, j in mapping.items():
+        result.associations.append(Association(i, j, math.hypot(ref[i].x - tgt[j].x, ref[i].y - tgt[j].y), "SPATIAL", False))
+    result.by_reference = {a.reference_row: a for a in result.associations}
+    result.by_target = {a.target_row: a for a in result.associations}
+    return result
+
+
 def test_nearest_row_not_used_and_a_displaced_run():
-    # The two logs are offset by one row: every reference record sits on the NEXT target position.
+    # A safety net for any alignment that leaves records one row off: every reference record sits on the target row
+    # before the one at its own position.
     ref = line_ref([STEP * i for i in range(40)])
     tgt = line_tgt([STEP * (j - 1) + 0.05 for j in range(40)])
-    alignment, findings = qc_for(ref, tgt)
+    findings = run_qc(ref, tgt, placed_by_hand(ref, tgt, {i: i for i in range(40)}), PARAMS)
     assert len(codes(findings, "ASSOCIATION_NEAREST_OVERRIDDEN")) == 39
     (run,) = codes(findings, "ASSOCIATION_RUN_DISPLACED")
     assert run.severity == WARNING and run.metrics["records"] == 39 and "one place before" in run.message
     assert run.metrics["median_nearest_distance_m"] < 0.1 < run.metrics["median_assigned_distance_m"]
-    assert alignment.complete and all(a.target_row == a.reference_row for a in alignment.associations)
+
+
+def test_the_aligner_follows_positions_so_the_same_offset_logs_raise_no_displaced_run():
+    ref = line_ref([STEP * i for i in range(40)])
+    tgt = line_tgt([STEP * (j - 1) + 0.05 for j in range(40)])
+    alignment, findings = qc_for(ref, tgt)
+    assert not codes(findings, "ASSOCIATION_RUN_DISPLACED") and not codes(findings, "ASSOCIATION_NEAREST_OVERRIDDEN")
+    assert [a.target_row for a in alignment.associations] == list(range(1, 40))
+    (blocked,) = codes(findings, "ASSOCIATION_BLOCKED")
+    assert blocked.reference_row == 39, "the last record has no target row beyond the end of the log"
 
 
 def test_unplaceable_reference_records_are_severe_blocked_findings():
@@ -186,6 +207,32 @@ def test_unplaceable_reference_records_are_severe_blocked_findings():
     assert not alignment.complete
     (blocked,) = codes(findings, "ASSOCIATION_BLOCKED")
     assert blocked.severity == SEVERE and blocked.reference_row == alignment.unplaced_reference_rows[0]
+    assert "the target has 3 rows but the recorder has 4 valid records" in blocked.message
+
+
+def test_unplaced_record_names_its_rival_and_prices_making_room():
+    xs = [STEP * i for i in range(60)]
+    reference = line_ref(xs[:11] + [xs[10] + 0.3] + xs[11:])        # the shot at xs[10] is recorded twice
+    target = line_tgt(xs[:40] + [xs[39] + 0.5] + xs[40:])           # the target has one row there and a spare one later
+    alignment, findings = qc_for(reference, target)
+    assert alignment.unplaced_reference_rows == [11]
+    (blocked,) = codes(findings, "ASSOCIATION_BLOCKED")
+    assert blocked.severity == SEVERE and blocked.reference_row == 11
+    assert "belongs to recorder FFID 110 (it fits it better, 0.00 m)" in blocked.message
+    assert "no free target row lies between recorder FFID 110 and FFID 112" in blocked.message
+    assert "next 29 recorder records one target row later (to the unused row at line 41)" in blocked.message
+    assert blocked.metrics["shift_records"] == 29 and blocked.metrics["shift_cost_m"] > 80
+
+
+def test_unplaced_terminal_record_explains_that_no_target_row_is_left():
+    xs = [STEP * i for i in range(50)]
+    reference = line_ref(xs + [500.0])                              # the last record's coordinate jumps
+    target = line_tgt(xs[:20] + [xs[19] + 0.5] + xs[20:])
+    _, findings = qc_for(reference, target)
+    (blocked,) = codes(findings, "ASSOCIATION_BLOCKED")
+    assert "no target row lies within 15.625 m of its coordinate and no free target row lies after recorder FFID 149" in blocked.message
+    assert "previous 30 recorder records one target row earlier" in blocked.message
+    assert [f.code for f in findings if f.reference_row == 50 and f.scope == "RECORDER"] == ["RECORDER_POSITION_JUMP"]
 
 
 # ---------------------------------------------------------------------------------------------------

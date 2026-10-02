@@ -28,7 +28,7 @@ The application runs as a single desktop window on Windows, often in a survey-ve
 
 ## Capabilities and Constraints
 
-Preserve the recorder-authoritative model (docs/recorder-authority-model.md): the recorder is the reference and is never modified; the EIVA file is the correction target; matching is recorder -> EIVA, ordered and one-to-one, using full-precision coordinates plus sequence continuity; distance is a QC and confidence signal, never an existence test; correction blockers (structural impossibilities) and QC warnings are separate concepts. Parsing stays generic and profile-driven. Keep the Tkinter UI available as fallback. Source logs remain read-only.
+Preserve the recorder-authoritative model (docs/recorder-authority-model.md): the recorder is the reference and is never modified; the EIVA file is the correction target; matching is recorder -> EIVA, spatial proximity first (full-precision coordinates), then one-to-one and acquisition order, with sequence continuity as tie-breaker and anomaly fallback, and no assumed row lag; distance is a QC and confidence signal, never an existence test; correction blockers (structural impossibilities) and QC warnings are separate concepts. Parsing stays generic and profile-driven. Keep the Tkinter UI available as fallback. Source logs remain read-only.
 
 ## Brand Commitments
 
@@ -36,7 +36,7 @@ The product name is ShotLogFixer. The visual direction is a compact professional
 
 ## Evidence on Hand
 
-The regression sample is `OS_A-2_LOG.txt` (EIVA, 6,769 rows) with `OS_A-2_pronav.txt` (recorder, 6,764 records, FFID 101 to 6873, last record about 210 m off the track). All 6,764 recorder records are assigned one-to-one and in order, the corrected EIVA copy has 6,764 rows, 5 EIVA rows are removed, and recorder FFID 6873 is assigned to the final EIVA row with a severe QC flag (see `tests/test_real_sample.py`; real data is not committed). The earlier OS_A-1 baseline (2816 EIVA rows, 2814 recorder rows) predates this model and was recorded under the former tolerance-based matching.
+The regression sample is `OS_A-2_LOG.txt` (EIVA, 6,769 rows) with `OS_A-2_pronav.txt` (recorder, 6,764 records, FFID 101 to 6873, last record about 210 m off the track). 6,762 recorder records are assigned one-to-one and in order, each on the EIVA row at its position (none more than 2.4 m away), the corrected EIVA copy has 6,762 rows, 7 EIVA rows are removed, and two recorder records have no EIVA row: FFID 2525 (recorded 0.4 m from FFID 2526 where the EIVA log has one row) and FFID 6873 (a 210 m position jump, beyond the end of the EIVA log). Both are reported as `Blocked` with a severe QC finding that prices the alternative (see `tests/test_real_sample.py`; real data is not committed). The earlier OS_A-1 baseline (2816 EIVA rows, 2814 recorder rows) predates this model and was recorded under the former tolerance-based matching.
 
 ## Product Principles
 

@@ -44,7 +44,9 @@ def validate_corrected_copy(original_text: str, corrected_text: str, reference: 
     checks["order_preserved"] = (all(a < b for a, b in zip(reference_rows, reference_rows[1:]))
                                  and all(a < b for a, b in zip(target_rows, target_rows[1:])))
     checks["only_valid_reference_records"] = all(reference[r].classification == VALID for r in reference_rows)
-    checks["every_valid_reference_record_assigned"] = alignment.complete and len(kept) == plan.reference_valid
+    # No valid reference record may vanish: each is either in the copy or reported as having no target row.
+    checks["every_valid_reference_record_accounted_for"] = (len(kept) + len(alignment.unplaced_reference_rows) == plan.reference_valid
+                                                            and set(reference_rows).isdisjoint(alignment.unplaced_reference_rows))
     try:
         output = parse_canonical(corrected_text, profile)
         original_table, corrected_table = parse_table(original_text, profile), parse_table(corrected_text, profile)
@@ -55,7 +57,6 @@ def validate_corrected_copy(original_text: str, corrected_text: str, reference: 
         return result
     result.corrected_rows = len(output)
     checks["row_count"] = len(output) == len(kept)
-    checks["row_count_equals_reference"] = len(output) == plan.expected_rows if alignment.complete else True
     checks["ffids_from_reference"] = [o.original_ffid for o in output] == [a.corrected_ffid for a in kept]
     ffid_index = profile.mapping["FFID"]
     unrelated = len(output) == len(kept)
@@ -76,7 +77,7 @@ def validate_corrected_copy(original_text: str, corrected_text: str, reference: 
         "order_preserved": "The assignment does not preserve acquisition order",
         "only_valid_reference_records": "A reference record that is not valid was used as an FFID source",
         "row_count": "The corrected copy does not contain exactly the assigned rows",
-        "row_count_equals_reference": "The corrected row count differs from the number of valid reference records",
+        "every_valid_reference_record_accounted_for": "A valid reference record is neither in the corrected copy nor reported as unplaced",
         "ffids_from_reference": "The corrected FFIDs are not the reference FFIDs, in reference order",
         "unrelated_fields_unchanged": "A field other than the FFID differs from the source row",
         "structure_preserved": "The header or the non-record lines of the target file changed",

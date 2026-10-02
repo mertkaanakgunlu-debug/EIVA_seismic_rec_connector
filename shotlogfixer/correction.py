@@ -7,6 +7,10 @@ does that row receive?*  The corrected copy is built from the target file only (
 * every target row without a reference record is removed;
 * header, preamble, comments, blank lines, delimiters, quoting, line endings and encoding are preserved.
 
+A valid reference record that no target row can hold (``alignment.unplaced_reference_rows``) has nothing to renumber, so
+it is absent from the copy; it stays visible as a ``BLOCKED`` result row and a severe QC finding.  It does not block the
+copy: that would withhold every correct association because of one shot the target log lacks.
+
 QC observations (large distances, coordinate jumps, FFID gaps ...) never enter this module.  The only things that block
 a corrected copy are structural impossibilities, listed in ``build_correction_plan``.
 """
@@ -22,7 +26,7 @@ from typing import Optional, Sequence
 
 from .alignment import AlignmentResult
 from .format_profiles import FormatProfile
-from .models import INVALID, SourceRecord, VALID
+from .models import INVALID, SourceRecord
 from .table_parser import replace_fields
 
 KEEP_AND_RENUMBER = "KEEP_AND_RENUMBER"
@@ -60,6 +64,7 @@ class CorrectionPlan:
     blockers: list[Blocker] = field(default_factory=list)
     reference_valid: int = 0
     assigned: int = 0
+    reference_without_target: int = 0         # valid reference records no target row could hold (absent from the copy)
     target_only_removed: int = 0
     invalid_target_removed: int = 0
 
@@ -73,7 +78,7 @@ class CorrectionPlan:
 
     @property
     def expected_rows(self) -> int:
-        """When every valid reference record is assigned, the corrected copy has exactly this many data rows."""
+        """The valid reference records: the corrected copy has one row for each that received a target row."""
         return self.reference_valid
 
 
@@ -88,7 +93,8 @@ def sha256_file(path: str | Path) -> str:
 def build_correction_plan(reference: Sequence[SourceRecord], target: Sequence[SourceRecord],
                           alignment: AlignmentResult, target_profile: FormatProfile) -> CorrectionPlan:
     """Decide the fate of every target row and list the structural blockers (never QC warnings)."""
-    plan = CorrectionPlan(reference_valid=alignment.reference_valid)
+    plan = CorrectionPlan(reference_valid=alignment.reference_valid,
+                          reference_without_target=len(alignment.unplaced_reference_rows))
     invalid_reference = [r for r in reference if r.classification == INVALID]
     if invalid_reference:
         first = invalid_reference[0]
@@ -100,7 +106,7 @@ def build_correction_plan(reference: Sequence[SourceRecord], target: Sequence[So
         plan.blockers.append(Blocker("NO_REFERENCE_RECORDS", "The recorder log contains no valid records to assign."))
     if not target:
         plan.blockers.append(Blocker("NO_TARGET_ROWS", "The target file contains no data rows."))
-    elif not alignment.complete and alignment.reference_valid:
+    elif len(target) < alignment.reference_valid:
         plan.blockers.append(Blocker(
             "INSUFFICIENT_TARGET_ROWS",
             f"The target has {len(target)} rows but the recorder has {alignment.reference_valid} valid records; "

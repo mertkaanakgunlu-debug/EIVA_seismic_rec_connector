@@ -443,6 +443,7 @@ export default function App() {
   const maxDistance = distances.length ? distances[distances.length - 1] : null;
   const summary = analysis?.summary;
   const displacedRuns = analysis?.qc.summary.by_code.ASSOCIATION_RUN_DISPLACED ?? 0;
+  const withoutRow = analysis?.correction.reference_without_target ?? 0;
   const counterTotal = (group: GroupKey) => problemGroups[group].length;
 
   return <div className="app-shell" data-diagnostics-isolation={isolation}>
@@ -489,11 +490,11 @@ export default function App() {
         {analysis && <div className={`correction-line ${correctionReady ? "correction-ready" : "correction-blocked"}`}>
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
-            ? `${analysis.correction.assigned.toLocaleString()} recorder records assigned · ${(analysis.correction.target_only_removed + analysis.correction.invalid_target_removed).toLocaleString()} target rows removed · corrected copy ${analysis.correction.corrected_rows.toLocaleString()} rows (expected ${analysis.correction.expected_rows.toLocaleString()}) · QC warnings do not block output${displacedRuns ? ` · ${displacedRuns} displaced run${displacedRuns === 1 ? "" : "s"}: review QC before saving` : ""}`
+            ? `${analysis.correction.assigned.toLocaleString()} recorder records assigned · ${(analysis.correction.target_only_removed + analysis.correction.invalid_target_removed).toLocaleString()} target rows removed · corrected copy ${analysis.correction.corrected_rows.toLocaleString()} rows${withoutRow ? ` · ${withoutRow.toLocaleString()} recorder record${withoutRow === 1 ? " has" : "s have"} no EIVA row (Blocked) and ${withoutRow === 1 ? "is" : "are"} not in the copy: review QC` : ""} · QC warnings do not block output${displacedRuns ? ` · ${displacedRuns} displaced run${displacedRuns === 1 ? "" : "s"}: review QC before saving` : ""}`
             : `${correctionBlockers.length.toLocaleString()} structural blocker${correctionBlockers.length === 1 ? "" : "s"}. `}<button className="inline-details" onClick={() => setCorrectionDetailsOpen(true)} disabled={correctionReady}>View details</button></span>
         </div>}
         {analysis && correctionDetailsOpen && <CorrectionDetails blockers={correctionBlockers} onClose={() => setCorrectionDetailsOpen(false)} />}
-        {analysis && <div className="correction-preview"><span>Assigned: <b>{analysis.correction.assigned.toLocaleString()}</b></span><span>Target-only removed: <b>{analysis.correction.target_only_removed.toLocaleString()}</b></span><span>Corrected rows: <b>{analysis.validation.corrected_rows.toLocaleString()} / {analysis.validation.expected_rows.toLocaleString()}</b></span><span>FFIDs changed: <b>{analysis.validation.ffid_changed.toLocaleString()}</b> · unchanged: <b>{analysis.validation.ffid_unchanged.toLocaleString()}</b></span><span>Association distance: median <b>{medianDistance === null ? "—" : `${medianDistance.toFixed(3)} m`}</b> · max <b>{maxDistance === null ? "—" : `${maxDistance.toFixed(3)} m`}</b></span></div>}
+        {analysis && <div className="correction-preview"><span>Assigned: <b>{analysis.correction.assigned.toLocaleString()}</b></span><span>Target-only removed: <b>{analysis.correction.target_only_removed.toLocaleString()}</b></span><span title="One corrected row for each recorder record that received a target row">Corrected rows: <b>{analysis.validation.corrected_rows.toLocaleString()}</b> of <b>{analysis.validation.expected_rows.toLocaleString()}</b> recorder records</span><span>FFIDs changed: <b>{analysis.validation.ffid_changed.toLocaleString()}</b> · unchanged: <b>{analysis.validation.ffid_unchanged.toLocaleString()}</b></span><span>Association distance: median <b>{medianDistance === null ? "—" : `${medianDistance.toFixed(3)} m`}</b> · max <b>{maxDistance === null ? "—" : `${maxDistance.toFixed(3)} m`}</b></span></div>}
       </section>
 
       <section className="timeline-section" aria-label="Acquisition timeline">

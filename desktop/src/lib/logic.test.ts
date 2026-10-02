@@ -83,8 +83,8 @@ describe("association and QC are separate axes", () => {
   });
 
   it("summarises correction counts without implying QC warnings are unmatched shots", () => {
-    const summary = summaryForDisplay({ reference_rows: 6764, reference_valid: 6764, reference_no_shot: 0, reference_invalid: 0, target_rows: 6769, target_invalid: 0, assigned: 6764, target_only: 5, invalid_target_removed: 0, blocked: 0, corrected_rows: 6764, expected_rows: 6764, qc_info: 10, qc_warning: 337, qc_severe: 2, assigned_with_warning: 335, assigned_with_severe: 1 });
-    expect(summary).toMatchObject({ assigned: 6764, targetOnly: 5, correctedRows: 6764, expectedRows: 6764, qcSevere: 2, qcWarning: 337 });
+    const summary = summaryForDisplay({ reference_rows: 6764, reference_valid: 6764, reference_no_shot: 0, reference_invalid: 0, target_rows: 6769, target_invalid: 0, assigned: 6762, target_only: 7, invalid_target_removed: 0, blocked: 2, corrected_rows: 6762, expected_rows: 6764, qc_info: 298, qc_warning: 12, qc_severe: 3, assigned_with_warning: 12, assigned_with_severe: 0 });
+    expect(summary).toMatchObject({ assigned: 6762, targetOnly: 7, blocked: 2, correctedRows: 6762, expectedRows: 6764, qcSevere: 3, qcWarning: 12 });
   });
 
   it("keeps canonical codes while presenting readable labels", () => {
@@ -92,6 +92,7 @@ describe("association and QC are separate axes", () => {
     expect(formatAssociation("BLOCKED")).toBe("Blocked");
     expect(formatSeverity("OK")).toBe("OK");
     expect(formatQcCode("ASSOCIATION_DISTANCE_LARGE")).toBe("High distance");
+    expect(formatQcCode("ASSOCIATION_BLOCKED")).toBe("No target row");
     expect(formatQcCode("SOMETHING_NEW")).toBe("something new");
     expect(formatQc({ qc_severity: "OK", qc_codes: [] })).toBe("OK");
   });

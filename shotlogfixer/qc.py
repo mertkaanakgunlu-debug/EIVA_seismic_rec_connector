@@ -10,13 +10,13 @@ Scopes
     ASSOCIATION  the relationship between an associated reference record and its target row
 """
 
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass
 import math
 from statistics import median
 from typing import Optional, Sequence
 
-from config import AMBIGUITY_MARGIN_M
 from .alignment import AlignmentResult
 from .models import INFO, INVALID, NO_SHOT, SEVERE, SEVERITY_ORDER, WARNING, SourceRecord
 from .profile_validation import finite
@@ -283,7 +283,7 @@ def _association_findings(reference, target, alignment: AlignmentResult, params)
             options = ", ".join(str(target[j].source_line_number) for j in a.alternative_target_rows)
             findings.append(Finding(ASSOCIATION, "ASSOCIATION_AMBIGUOUS", WARNING,
                                     f"Recorder FFID {ref.original_ffid} could equally be placed on other target rows (line {options}); "
-                                    "the choice was made by sequence continuity.",
+                                    "the closest fit that keeps acquisition order was chosen (exact ties go to the earliest row).",
                                     metrics={"alternative_target_rows": list(a.alternative_target_rows)}, **where))
         # Is a much closer target row sitting next door while this one went elsewhere?
         direction, nearest = 0, None
@@ -315,12 +315,58 @@ def _association_findings(reference, target, alignment: AlignmentResult, params)
                                 reference_row=first.reference_row, target_row=first.target_row,
                                 metrics={"records": count, "last_reference_row": last.reference_row,
                                          "median_assigned_distance_m": median(assigned), "median_nearest_distance_m": median(nearest)}))
-    for row in alignment.unplaced_reference_rows:
-        r = reference[row]
-        findings.append(Finding(ASSOCIATION, "ASSOCIATION_BLOCKED", SEVERE,
-                                f"Recorder FFID {r.original_ffid} (line {r.source_line_number}) could not be placed on a distinct target row: "
-                                "the target has fewer rows than there are valid recorder records.", reference_row=row))
+    findings += _unplaced_findings(reference, target, alignment, params)
     return findings
+
+
+def _unplaced_findings(reference, target, alignment: AlignmentResult, params) -> list[Finding]:
+    """A valid recorder record with no target row is a real shot the target log lacks (or cannot hold in order)."""
+    findings = []
+    assigned = [r.row_index for r in reference if r.row_index in alignment.by_reference]
+    for row in alignment.unplaced_reference_rows:
+        r, detail = reference[row], alignment.unplaced.get(row)
+        subject = f"Recorder FFID {r.original_ffid} (line {r.source_line_number}) has no target row"
+        if len(target) < alignment.reference_valid:
+            reason = f"the target has {len(target):,} rows but the recorder has {alignment.reference_valid:,} valid records."
+        else:
+            reason = _unplaced_reason(r, detail, reference, target, alignment, params, assigned)
+        metrics = {"nearest_target_row": detail.nearest_target_row if detail else None,
+                   "nearest_distance_m": detail.nearest_distance_m if detail else None,
+                   "shift_records": detail.shift_records if detail else None,
+                   "shift_cost_m": detail.shift_cost_m if detail else None}
+        findings.append(Finding(ASSOCIATION, "ASSOCIATION_BLOCKED", SEVERE, f"{subject}: {reason}", reference_row=row, metrics=metrics))
+    return findings
+
+
+def _unplaced_reason(record, detail, reference, target, alignment, params, assigned) -> str:
+    at = bisect_left(assigned, record.row_index)          # ``assigned`` is in reference order and excludes this record
+    previous = assigned[at - 1] if at else None
+    following = assigned[at] if at < len(assigned) else None
+    neighbours = ("between recorder FFID {} and FFID {}".format(reference[previous].original_ffid, reference[following].original_ffid)
+                  if previous is not None and following is not None else
+                  f"after recorder FFID {reference[previous].original_ffid}" if previous is not None else
+                  f"before recorder FFID {reference[following].original_ffid}" if following is not None else "anywhere")
+    nearest = detail.nearest_target_row if detail else None
+    if nearest is None:
+        why = f"no target row lies within {params.alignment_cap_m:g} m of its coordinate and no free target row lies {neighbours}"
+    else:
+        near = target[nearest]
+        holder = alignment.by_target.get(nearest)
+        owner = ""
+        if holder is not None:
+            fit = f", {holder.distance_m:.2f} m" if holder.distance_m is not None else ""
+            owner = f" belongs to recorder FFID {reference[holder.reference_row].original_ffid} (it fits it better{fit})"
+        owner = owner or " lies outside the rows that acquisition order allows it"
+        why = (f"its nearest target row (line {near.source_line_number}, {detail.nearest_distance_m:.2f} m){owner} "
+               f"and no free target row lies {neighbours}")
+    if detail is None or detail.shift_records is None:
+        return why + "."
+    side = "later" if detail.shift_side == "AFTER" else "earlier"
+    which = "next" if detail.shift_side == "AFTER" else "previous"
+    end = target[detail.shift_end_row]
+    return (f"{why}. Making room would move the {which} {detail.shift_records:,} recorder records one target row {side} "
+            f"(to the unused row at line {end.source_line_number}), adding {detail.shift_cost_m:,.0f} m of total distance to their "
+            "associations, so it is left unassigned.")
 
 
 def _runs(flags, min_rows=RUN_MIN_ROWS, max_gap=RUN_MAX_GAP):

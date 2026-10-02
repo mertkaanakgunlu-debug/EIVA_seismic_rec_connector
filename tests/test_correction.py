@@ -80,7 +80,8 @@ def test_case7_large_distance_without_any_hard_rejection(tmp_path):
 def test_row_count_property_when_every_reference_record_is_assigned(tmp_path):
     _, _, analysis = reconcile(tmp_path, track(8, first_ffid=1), track(11, first_ffid=1))
     assert analysis.plan.assigned == analysis.plan.expected_rows == 8
-    assert analysis.validation.corrected_rows == 8 and analysis.validation.checks["row_count_equals_reference"]
+    assert analysis.validation.corrected_rows == 8 and analysis.validation.checks["row_count"]
+    assert analysis.validation.checks["every_valid_reference_record_accounted_for"] and analysis.plan.reference_without_target == 0
     assert len(corrected_lines(analysis)) == 1 + 8
 
 
@@ -96,7 +97,7 @@ def test_ffids_come_from_the_reference_never_from_the_target(tmp_path):
 # ---------------------------------------------------------------------------------------------------
 
 def test_qc_warnings_do_not_block_a_corrected_copy(tmp_path):
-    reference = [(100, 0.0, 0.0), (101, 3.1, 0.0), (102, 6.2, 0.0), (110, 500.0, 0.0), (111, 9.3, 0.0), (112, 12.4, 0.0)]
+    reference = [(100, 0.0, 0.0), (101, 3.1, 0.0), (102, 6.2, 0.0), (110, 500.0, 0.0), (111, 12.4, 0.0), (112, 15.5, 0.0)]
     _, _, analysis = reconcile(tmp_path, reference, track(6, first_ffid=1, x0=0.0, y0=0.0))
     severities = summarise(analysis.findings)["by_severity"]
     assert severities.get("SEVERE") and severities.get("WARNING")
@@ -269,29 +270,56 @@ def test_qc_cannot_change_the_correction(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------------
-# Structural discrepancies between the two logs (exposed by the real OS_A-2 survey)
+# Spatial proximity first: structural discrepancies between the logs (exposed by the real OS_A-2 survey)
 # ---------------------------------------------------------------------------------------------------
 
-def test_recorder_positions_that_lead_the_target_by_one_shot_are_flagged_as_a_displaced_run(tmp_path):
-    # Each recorder record carries the position of the NEXT shot, and the last record (no next fix) sits far away.
+def test_recorder_positions_that_lead_the_target_by_one_shot_follow_the_positions(tmp_path):
+    # Each recorder record carries the position of the NEXT target row, and the last record (no next fix) sits far away.
     n = 60
     target = [(1 + j, 1000.0 + INTERVAL * j, 2000.0) for j in range(n)]
     reference = [(500 + i, 1000.0 + INTERVAL * (i + 1), 2000.0) for i in range(n - 1)] + [(500 + n - 1, 1200.0, 2100.0)]
     _, _, analysis = reconcile(tmp_path, reference, target)
-    assert analysis.plan.safe_to_build and analysis.plan.assigned == n and analysis.plan.target_only_removed == 0
-    (run,) = codes(analysis.findings, "ASSOCIATION_RUN_DISPLACED")
-    assert "one place before" in run.message and run.metrics["records"] >= 50
-    last = analysis.rows[-1]
-    assert last.association == "ASSIGNED" and last.corrected_ffid == "559" and last.qc_severity == "SEVERE"
+    assert analysis.plan.safe_to_build and analysis.validation.passed, "a record without a row never blocks the copy"
+    assert (analysis.plan.assigned, analysis.plan.target_only_removed, analysis.plan.reference_without_target) == (59, 1, 1)
+    assert not codes(analysis.findings, "ASSOCIATION_RUN_DISPLACED"), "no stretch of records was moved off its own position"
+    rows = association_by_ffid(analysis)
+    assert all(rows[str(500 + i)].target.row_index == i + 1 and rows[str(500 + i)].pair.distance_m < 1e-6 for i in range(n - 1))
+    last = rows["559"]
+    assert last.association == "BLOCKED" and last.target is None and last.corrected_ffid is None
+    assert last.qc_severity == "SEVERE" and {"ASSOCIATION_BLOCKED", "RECORDER_POSITION_JUMP"} <= {f.code for f in last.findings}
+    assert [line.split(",")[0] for line in corrected_lines(analysis)[1:]] == [str(500 + i) for i in range(n - 1)]
 
 
-def test_recorder_only_shot_displaces_a_run_until_an_extra_target_row_absorbs_it(tmp_path):
+def test_recorder_only_shot_is_reported_not_forced_onto_a_neighbour(tmp_path):
     shots = [(1000.0 + INTERVAL * k, 2000.0) for k in range(100)]
     reference = [(300 + k, x, y) for k, (x, y) in enumerate(shots)]                  # every shot was recorded
     target = shots[:40] + shots[41:80] + [shots[79]] + shots[80:]                     # shot 40 never logged; shot 79 logged twice
     target = [(1 + i, x, y) for i, (x, y) in enumerate(target)]
     _, _, analysis = reconcile(tmp_path, reference, target)
-    assert analysis.plan.safe_to_build and analysis.plan.assigned == 100
-    (run,) = codes(analysis.findings, "ASSOCIATION_RUN_DISPLACED")
-    assert "one place after" in run.message and run.metrics["records"] >= 35
-    assert association_by_ffid(analysis)["340"].qc_severity in {"INFO", "WARNING"}      # reported, not hidden
+    assert analysis.plan.safe_to_build and analysis.validation.passed
+    assert (analysis.plan.assigned, analysis.plan.reference_without_target, analysis.plan.target_only_removed) == (99, 1, 1)
+    rows = association_by_ffid(analysis)
+    assert rows["340"].association == "BLOCKED" and rows["340"].qc_severity == "SEVERE"
+    (finding,) = codes(analysis.findings, "ASSOCIATION_BLOCKED")
+    assert "recorder FFID 339" in finding.message and "next 39 recorder records" in finding.message
+    # Every other shot sits on the target row at its own position; the logging gap did not shift the 39 shots after it.
+    assert all(row.pair.distance_m < 1e-6 for ffid, row in rows.items() if ffid != "340")
+    assert [line.split(",")[0] for line in corrected_lines(analysis)[1:]] == [str(300 + k) for k in range(100) if k != 40]
+    assert analysis.validation.checks["every_valid_reference_record_accounted_for"]
+
+
+def test_recorder_outage_leaves_navigation_rows_unassigned_and_never_decides_identity_by_row_offset(tmp_path):
+    """FFID 104 is followed by 105 after an outage while the navigation log kept running (about 100 rows between)."""
+    positions = [(1000.0 + INTERVAL * k, 2000.0) for k in range(260)]
+    shots = list(range(0, 5)) + list(range(106, 110)) + list(range(230, 235))         # target rows the recorder saw
+    reference = [(100 + n, positions[k][0] + 0.1, positions[k][1]) for n, k in enumerate(shots)]
+    target = [(9000 + k, x, y) for k, (x, y) in enumerate(positions)]                  # target FFIDs say nothing about identity
+    _, _, analysis = reconcile(tmp_path, reference, target)
+    assert analysis.plan.safe_to_build and analysis.plan.assigned == len(shots) and analysis.plan.reference_without_target == 0
+    rows = association_by_ffid(analysis)
+    assert [rows[str(100 + n)].target.row_index for n in range(len(shots))] == shots
+    assert rows["105"].target.row_index - rows["104"].target.row_index == 102, "a jump of 102 rows is no penalty"
+    assert analysis.plan.target_only_removed == 260 - len(shots)
+    blocks = codes(analysis.findings, "TARGET_ONLY_BLOCK")
+    assert [f.metrics["rows"] for f in blocks] == [101, 120, 25], "the unused stretches are reported by QC, not corrected differently"
+    assert [line.split(",")[0] for line in corrected_lines(analysis)[1:]] == [str(100 + n) for n in range(len(shots))]

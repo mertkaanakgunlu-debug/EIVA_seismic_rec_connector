@@ -32,7 +32,7 @@ QC_LABELS = {
     "ASSOCIATION_AMBIGUOUS": "Ambiguous",
     "ASSOCIATION_NEAREST_OVERRIDDEN": "Nearest row not used",
     "ASSOCIATION_RUN_DISPLACED": "Displaced run",
-    "ASSOCIATION_BLOCKED": "Blocked",
+    "ASSOCIATION_BLOCKED": "No target row",
 }
 
 

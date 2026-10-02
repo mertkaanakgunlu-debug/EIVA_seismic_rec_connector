@@ -275,6 +275,7 @@ def analyse_response(analysis: Analysis) -> dict[str, Any]:
             "safe": plan.safe_to_build and analysis.validation.passed,
             "blockers": [{"code": b.code, "message": b.message} for b in plan.blockers],
             "assigned": plan.assigned,
+            "reference_without_target": plan.reference_without_target,
             "target_only_removed": plan.target_only_removed,
             "invalid_target_removed": plan.invalid_target_removed,
             "corrected_rows": plan.corrected_rows,

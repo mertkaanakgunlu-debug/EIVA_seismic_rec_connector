@@ -46,6 +46,7 @@ def export_txt(path: str | Path, analysis: Analysis, input_formats=None) -> None
         f.write(f'status={"READY" if plan.safe_to_build and analysis.validation.passed else "BLOCKED"}\n')
         f.write(f'reference_valid_records={plan.reference_valid}\n')
         f.write(f'assigned={plan.assigned}\n')
+        f.write(f'reference_without_target={plan.reference_without_target}\n')
         f.write(f'target_only_removed={plan.target_only_removed}\n')
         f.write(f'invalid_target_removed={plan.invalid_target_removed}\n')
         f.write(f'corrected_rows={plan.corrected_rows}\n')

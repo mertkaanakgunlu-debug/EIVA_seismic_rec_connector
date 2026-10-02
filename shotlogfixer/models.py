@@ -28,7 +28,7 @@ ASSIGNED = "ASSIGNED"            # a reference record was associated with a targ
 TARGET_ONLY = "TARGET_ONLY"      # target row with no reference record: removed from the corrected copy
 INVALID_ROW = "INVALID"          # row cannot take part (unparseable); never silently treated as a shot
 NO_SHOT_ROW = "NO_SHOT"          # reference row explicitly marked "no shot"
-BLOCKED = "BLOCKED"              # valid reference record that could not be placed one-to-one
+BLOCKED = "BLOCKED"              # valid reference record that no target row can hold (not a correction blocker)
 
 # QC severities, ordered.
 INFO = "INFO"
