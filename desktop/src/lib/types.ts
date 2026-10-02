@@ -1,114 +1,123 @@
-export const STATUSES = ["MATCHED", "EIVA_ONLY", "NO_SHOT", "RECORDER_INVALID", "REVIEW"] as const;
-export type Status = (typeof STATUSES)[number];
+/** Correction decision for one result row. Independent of QC: a QC finding never changes it. */
+export const ASSOCIATIONS = ["ASSIGNED", "TARGET_ONLY", "INVALID", "NO_SHOT", "BLOCKED"] as const;
+export type Association = (typeof ASSOCIATIONS)[number];
+export type QcSeverity = "OK" | "INFO" | "WARNING" | "SEVERE";
 
 export interface AnalysisSummary {
-  eiva_rows: number;
-  recorder_rows: number;
-  matched: number;
-  eiva_only: number;
-  recorder_invalid: number;
-  review: number;
-  total_issues: number;
-  no_shot?: number;
-  recorder_gap_count?: number;
-  unexplained_missing_positions?: number;
+  reference_rows: number;
+  reference_valid: number;
+  reference_no_shot: number;
+  reference_invalid: number;
+  target_rows: number;
+  target_invalid: number;
+  assigned: number;
+  target_only: number;
+  invalid_target_removed: number;
+  blocked: number;
+  corrected_rows: number;
+  expected_rows: number;
+  qc_info: number;
+  qc_warning: number;
+  qc_severe: number;
+  assigned_with_warning: number;
+  assigned_with_severe: number;
 }
 
-export interface RecorderGapEvent {
-  event_id: string;
-  left_recorder_source_index: number;
-  right_recorder_source_index: number;
-  left_recorder_ffid: string;
-  right_recorder_ffid: string;
-  left_x: number;
-  left_y: number;
-  right_x: number;
-  right_y: number;
-  distance_m: number;
-  shot_interval_m: number;
-  match_tolerance_m: number;
-  gap_span_steps: number;
-  estimated_missing_positions: number;
-  explicit_no_shot_count: number;
-  invalid_between_count: number;
-  unexplained_missing_positions: number;
-  left_eiva_source_index: number | null;
-  right_eiva_source_index: number | null;
-  intermediate_eiva_indices: number[];
-  eiva_only_indices: number[];
-  no_shot_eiva_indices: number[];
-  slot_assignments: Record<string, number>;
-  classification: string;
-  diagnostic: string;
-  blocks_correction: boolean;
-}
-
+/** One acquisition-ordered row: an association (pair), a target-only row, or a reference record without a target row. */
 export interface EngineRecord {
   id: string;
-  result_index: number;
   acquisition_position: number;
-  eiva_ffid: string | null;
-  recorder_ffid: string | null;
-  eiva_easting: number | null;
-  eiva_northing: number | null;
-  recorder_x: number | null;
-  recorder_y: number | null;
-  distance_m: number | null;
-  status: Status;
-  diagnostic: string;
-  gap_event_ids: string[];
-  eiva_values: Record<string, string>;
-}
-
-export interface CorrectionAction {
-  action: string;
-  eiva_ffid: string | null;
+  association: Association;
+  reference_ffid: string | null;
+  reference_line: number | null;
+  reference_x: number | null;
+  reference_y: number | null;
   target_ffid: string | null;
-  recorder_ffid: string | null;
-  eiva_source_index: number | null;
-  recorder_source_index: number | null;
-  status: Status;
-  reason: string;
+  target_line: number | null;
+  target_x: number | null;
+  target_y: number | null;
+  corrected_ffid: string | null;
   distance_m: number | null;
-  gap_event_id?: string | null;
+  basis: "SPATIAL" | "SEQUENCE" | null;
+  confidence: "HIGH" | "MEDIUM" | "LOW" | null;
+  qc_severity: QcSeverity;
+  qc_codes: string[];
+  diagnostic: string;
+  target_values: Record<string, string>;
 }
 
+export interface QcFinding {
+  scope: "RECORDER" | "TARGET" | "ASSOCIATION";
+  code: string;
+  severity: Exclude<QcSeverity, "OK">;
+  message: string;
+  reference_row: number | null;
+  target_row: number | null;
+  row_id: string | null;
+  metrics: Record<string, unknown>;
+}
+
+export interface FfidJump {
+  from: number | null;
+  to: number | null;
+  kind: "GAP" | "REVERSAL" | null;
+  row_id: string | null;
+}
+
+export interface CorrectionBlocker {
+  code: string;
+  message: string;
+}
+
+/** Only structural impossibilities block a corrected copy; QC warnings never do. */
 export interface CorrectionSummary {
   safe: boolean;
-  retained: number;
-  eiva_only_removed: number;
-  no_shot_removed: number;
-  blocking_reasons: string[];
-  actions: CorrectionAction[];
+  blockers: CorrectionBlocker[];
+  assigned: number;
+  target_only_removed: number;
+  invalid_target_removed: number;
+  corrected_rows: number;
+  expected_rows: number;
+  direction: string;
 }
 
 export interface ValidationSummary {
   passed: boolean;
-  fixed_eiva_rows: number;
-  fixed_recorder_rows: number;
-  ffid_pair_count: number;
-  ffid_match_count: number;
-  coordinate_pass_count: number;
-  max_distance_m: number | null;
-  mean_distance_m: number | null;
-  median_distance_m: number | null;
-  above_tolerance_count: number;
   errors: string[];
-  [key: string]: unknown;
+  corrected_rows: number;
+  expected_rows: number;
+  ffid_changed: number;
+  ffid_unchanged: number;
+  checks: Record<string, boolean>;
+}
+
+export interface QcSummary {
+  total: number;
+  by_severity: Record<string, number>;
+  by_scope: Record<string, number>;
+  by_code: Record<string, number>;
+}
+
+export interface AnalysisParameters {
+  shot_interval_m: number;
+  normal_distance_m: number;
+  elevated_distance_m: number;
+  severe_distance_m: number;
+  jump_distance_m: number;
+  severe_jump_distance_m: number;
 }
 
 export interface AnalysisSuccess {
   ok: true;
   summary: AnalysisSummary;
-  ffid_jumps: Array<{ from: string; to: string }>;
-  eiva_headers: string[];
   records: EngineRecord[];
   correction: CorrectionSummary;
   validation: ValidationSummary;
-  input_hashes?: { eiva: string; recorder: string };
-  parameters: { shot_interval_m: number; match_tolerance_m: number; recorder_gap_threshold_m: number };
-  recorder_gaps: RecorderGapEvent[];
-  input_formats?: { eiva: FormatProfileSummary; recorder: FormatProfileSummary };
+  qc: { summary: QcSummary; findings: QcFinding[]; ffid_jumps: FfidJump[] };
+  input_hashes?: { reference: string; target: string };
+  parameters: AnalysisParameters;
+  target_headers: string[];
+  input_formats?: { reference: FormatProfileSummary; target: FormatProfileSummary };
 }
 
 export interface FormatProfileSummary {

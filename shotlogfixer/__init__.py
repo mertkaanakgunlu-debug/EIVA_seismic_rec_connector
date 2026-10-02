@@ -1,1 +1,1 @@
-"""Offline Phase 1 EIVA/recorder QC utility."""
+"""Offline recorder-authoritative reconciliation utility: corrects an EIVA log against the recorder log."""

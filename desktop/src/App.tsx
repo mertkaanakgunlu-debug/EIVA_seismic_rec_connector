@@ -1,13 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
-import { basename, columnAlignment, ffidJumpTargets, getCellValue, nextCycle, resolveThemePreference, statusIndices, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX } from "./lib/logic";
-import type { AnalysisResponse, AnalysisSuccess, EngineRecord, ExportResponse, RecorderGapEvent, FormatProfileSummary } from "./lib/types";
+import { basename, columnAlignment, ffidJumpTargets, getCellValue, GROUP_KEYS, groupIndices, nextCycle, recordTone, resolveThemePreference, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX, type GroupKey } from "./lib/logic";
+import type { AnalysisResponse, AnalysisSuccess, CorrectionBlocker, EngineRecord, ExportResponse, FormatProfileSummary } from "./lib/types";
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
-import { formatDiagnostic, formatGapClassification, formatRecordStatus } from "./lib/presentation";
+import { formatAssociation, formatBlocker } from "./lib/presentation";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
+type Role = "reference" | "target";
 const EMPTY_RECORDS: EngineRecord[] = [];
+const EMPTY_NAV: Record<GroupKey, number | null> = { TARGET_ONLY: null, INVALID: null, BLOCKED: null, QC_SEVERE: null, QC_WARNING: null, POSITION_JUMP: null };
 
 function markTiming(name: string, start?: string) {
   if (!diagnosticsEnabled || typeof performance === "undefined") return;
@@ -17,18 +19,21 @@ function markTiming(name: string, start?: string) {
   }
 }
 
-const DEFAULT_COLUMNS = ["eiva_ffid", "recorder_ffid", "eiva_coord", "recorder_coord", "distance", "status"];
+const DEFAULT_COLUMNS = ["reference_ffid", "target_ffid", "corrected_ffid", "reference_coord", "target_coord", "distance", "association", "qc"];
 const BASE_COLUMNS: Array<{ key: string; label: string }> = [
-  { key: "eiva_ffid", label: "EIVA FFID" },
-  { key: "recorder_ffid", label: "Recorder FFID" },
-  { key: "eiva_coord", label: "EIVA Coordinate" },
-  { key: "recorder_coord", label: "Recorder Coordinate" },
+  { key: "reference_ffid", label: "Recorder FFID" },
+  { key: "target_ffid", label: "Target Original FFID" },
+  { key: "corrected_ffid", label: "Corrected FFID" },
+  { key: "reference_coord", label: "Recorder Coordinate" },
+  { key: "target_coord", label: "Target Coordinate" },
   { key: "distance", label: "Distance (m)" },
-  { key: "status", label: "Status" },
+  { key: "association", label: "Association" },
+  { key: "qc", label: "QC" },
+  { key: "basis", label: "Basis" },
+  { key: "confidence", label: "Confidence" },
   { key: "diagnostic", label: "Diagnostic" },
-  { key: "recorder_x", label: "Recorder SOU_X" },
-  { key: "recorder_y", label: "Recorder SOU_Y" },
-  { key: "gap", label: "Gap" },
+  { key: "reference_line", label: "Recorder Line" },
+  { key: "target_line", label: "Target Line" },
 ];
 
 function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "download" }) {
@@ -47,11 +52,12 @@ function StatusMark({ lifecycle }: { lifecycle: Lifecycle }) {
   return <span className={`status-mark status-mark-${lifecycle}`} aria-live="polite"><span className="status-mark-dot" />{labels[lifecycle]}</span>;
 }
 
+// "RECORDER" / "EIVA" are the stored profile slots: RECORDER profiles describe the authoritative reference input, EIVA profiles the target.
 function FormatStatus({ kind, state, onConfigure }: { kind: "EIVA" | "RECORDER"; state: any; onConfigure: () => void }) {
   const profile = state?.profile as FormatProfileSummary | undefined;
   const ready = Boolean(profile && state?.validation?.valid && profile.confidence !== "Unresolved");
   const label = profile ? (ready ? "Ready" : profile.confidence === "Review recommended" ? "Needs review" : "Not ready") : state?.error ? "Not ready" : "Inspecting…";
-  return <div className="format-status" aria-live="polite"><span className="format-role">Format</span><strong>{profile?.name || (kind === "EIVA" ? "EIVA format" : "Recorder format")}</strong><span className={`format-state ${ready ? "format-ready" : "format-review"}`}>{ready ? "✓" : "!"} {label}</span><button className="button secondary compact-button" onClick={onConfigure} disabled={!profile}>Configure</button></div>;
+  return <div className="format-status" aria-live="polite"><span className="format-role">Format</span><strong>{profile?.name || (kind === "EIVA" ? "Target format" : "Reference format")}</strong><span className={`format-state ${ready ? "format-ready" : "format-review"}`}>{ready ? "✓" : "!"} {label}</span><button className="button secondary compact-button" onClick={onConfigure} disabled={!profile}>Configure</button></div>;
 }
 
 type PreviewMode = "first" | "random" | "last" | "raw";
@@ -95,7 +101,7 @@ function FormatDialog({ kind, filePath, state, onCancel, onUse, onSave }: { kind
 
   if (!working) return null;
   const structure = working.structure || {};
-  const roleNames = kind === "EIVA" ? [["FFID", "FFID"], ["EIVA_EASTING", "EIVA Easting"], ["EIVA_NORTHING", "EIVA Northing"]] : [["FFID", "FFID"], ["RECORDER_X", "Recorder X"], ["RECORDER_Y", "Recorder Y"]];
+  const roleNames = kind === "EIVA" ? [["FFID", "FFID (replaced in the corrected copy)"], ["EIVA_EASTING", "Easting / X"], ["EIVA_NORTHING", "Northing / Y"]] : [["FFID", "FFID (authoritative)"], ["RECORDER_X", "X / Easting"], ["RECORDER_Y", "Y / Northing"]];
   const updateStructure = (key: string, value: unknown) => setWorking((current: any) => ({ ...current, [key === "header_mode" ? "header" : key]: value, structure: { ...current.structure, [key]: value } }));
   const updateMapping = (role: string, value: string) => setWorking((current: any) => { const mapping = { ...current.column_mapping }; if (value === "") delete mapping[role]; else mapping[role] = Number(value); return { ...current, column_mapping: mapping }; });
   const rows = preview?.[previewMode === "raw" ? "first" : previewMode] || [];
@@ -104,7 +110,7 @@ function FormatDialog({ kind, filePath, state, onCancel, onUse, onSave }: { kind
   const total = validation?.data_rows ?? 0;
   const valid = Boolean(validation?.valid && roleNames.every(([role]) => Number.isInteger(working.column_mapping?.[role])));
   return <div className="format-dialog" role="dialog" aria-modal="true" aria-labelledby="format-dialog-title"><div className="format-dialog-inner" ref={dialogRef} tabIndex={-1}>
-    <div className="format-dialog-header"><div><h2 id="format-dialog-title">Configure {kind === "EIVA" ? "EIVA" : "Recorder"} Format</h2><p className="dialog-file" title={filePath}>{basename(filePath)}</p></div><button className="icon-button" onClick={onCancel} aria-label="Cancel">×</button></div>
+    <div className="format-dialog-header"><div><h2 id="format-dialog-title">Configure {kind === "EIVA" ? "Target (EIVA)" : "Reference (Recorder)"} Format</h2><p className="dialog-file" title={filePath}>{basename(filePath)}</p></div><button className="icon-button" onClick={onCancel} aria-label="Cancel">×</button></div>
     <div className="format-config-grid"><label>Profile<select value={working.id || ""} onChange={(event) => { const selected = profiles.find((profile) => profile.id === event.target.value); if (selected) setWorking(JSON.parse(JSON.stringify(selected))); }}><option value="">Detected format</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}{profile.source === "BUILTIN" ? " (built-in)" : ""}</option>)}</select></label><label>Encoding<select value={structure.encoding || "AUTO"} onChange={(event) => updateStructure("encoding", event.target.value)}><option value="AUTO">Auto</option><option value="utf-8">UTF-8</option><option value="utf-8-sig">UTF-8 BOM</option><option value="cp1252">CP1252</option><option value="latin-1">Latin-1</option></select></label></div>
     <fieldset><legend>File structure</legend><div className="choice-row"><label><input type="radio" checked={working.source !== "CUSTOM"} onChange={() => setWorking((current: any) => ({ ...current, source: "DETECTED" }))} /> Auto detect</label><label><input type="radio" checked={working.source === "CUSTOM"} onChange={() => setWorking((current: any) => ({ ...current, source: "CUSTOM" }))} /> Custom</label></div><div className="format-config-grid"><label>Delimiter<select value={structure.delimiter || "comma"} onChange={(event) => updateStructure("delimiter", event.target.value)}><option value="comma">Comma (,)</option><option value="tab">Tab</option><option value="whitespace">Whitespace</option><option value="semicolon">Semicolon (;)</option><option value="pipe">Pipe (|)</option></select></label><label>Header<select value={structure.header_mode || "ABSENT"} onChange={(event) => updateStructure("header_mode", event.target.value)}><option value="ABSENT">No header</option><option value="PRESENT">First row contains names</option></select></label><label>Skip rows<input type="number" min="0" value={structure.skip_rows ?? 0} onChange={(event) => updateStructure("skip_rows", Math.max(0, Number(event.target.value) || 0))} /></label><label className="checkbox-label"><input type="checkbox" checked={structure.trim_whitespace !== false} onChange={(event) => updateStructure("trim_whitespace", event.target.checked)} /> Trim whitespace</label></div></fieldset>
     <fieldset><legend>Field mapping</legend><div className="mapping-grid">{roleNames.map(([role, label]) => <label key={role}>{label}<select value={String(working.column_mapping?.[role] ?? "")} onChange={(event) => updateMapping(role, event.target.value)}><option value="">Unmapped</option>{sourceColumns.map((column, index) => <option key={`${role}-${index}`} value={index}>{column || `Column ${index + 1}`}</option>)}</select></label>)}</div></fieldset>
@@ -114,16 +120,9 @@ function FormatDialog({ kind, filePath, state, onCancel, onUse, onSave }: { kind
   </div></div>;
 }
 
-function CorrectionDetails({ reasons, onClose }: { reasons: string[]; onClose: () => void }) {
-  const categories = useMemo(() => {
-    const groups = new Map<string, string[]>();
-    for (const reason of reasons) {
-      const category = reason.startsWith("Unresolved REVIEW") ? "Unresolved review" : reason.startsWith("Recorder") || reason.includes("NO_SHOT") ? "Recorder or NO_SHOT review" : reason.startsWith("Ambiguous") ? "Ambiguous mapping" : "Other validation block";
-      groups.set(category, [...(groups.get(category) || []), reason]);
-    }
-    return [...groups.entries()];
-  }, [reasons]);
-  return <div className="details-drawer" role="dialog" aria-modal="true" aria-label="Correction details"><div className="details-inner"><div className="format-dialog-header"><h2>Correction blocked</h2><button className="icon-button" onClick={onClose} aria-label="Close details">×</button></div><p className="dialog-file">Review the grouped conditions before saving a fixed file.</p><div className="reason-list">{categories.map(([category, values]) => <div className="reason-row" key={category}><strong>{category}</strong><span>{values.length.toLocaleString()}</span><small>{values.slice(0, 3).map((value) => formatDiagnostic(value)).join(" · ")}{values.length > 3 ? " · …" : ""}</small></div>)}</div><button className="button primary" onClick={onClose}>Close</button></div></div>;
+/** Structural impossibilities only. QC observations never appear here: they do not block a corrected copy. */
+function CorrectionDetails({ blockers, onClose }: { blockers: CorrectionBlocker[]; onClose: () => void }) {
+  return <div className="details-drawer" role="dialog" aria-modal="true" aria-label="Correction details"><div className="details-inner"><div className="format-dialog-header"><h2>Correction blocked</h2><button className="icon-button" onClick={onClose} aria-label="Close details">×</button></div><p className="dialog-file">These conditions make a corrected copy impossible. QC warnings never block output.</p><div className="reason-list">{blockers.map((blocker) => <div className="reason-row" key={`${blocker.code}-${blocker.message}`}><strong>{formatBlocker(blocker.code)}</strong><small title={blocker.message}>{blocker.message}</small></div>)}</div><button className="button primary" onClick={onClose}>Close</button></div></div>;
 }
 
 function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (value: ThemePreference) => void }) {
@@ -142,18 +141,18 @@ function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (v
 
 function errorMessage(response: AnalysisResponse | ExportResponse): string {
   const error = "error" in response ? response.error : undefined;
-  if (error?.message) return formatDiagnostic(error.detail ? `${error.message} ${error.detail}` : error.message);
+  if (error?.message) return error.detail ? `${error.message} ${error.detail}` : error.message;
   return "The requested operation could not be completed.";
 }
 
 export default function App() {
   useRenderDiagnostics("App");
   const isolation = diagnosticOptions?.isolation || "full";
-  const [eivaPath, setEivaPath] = useState("");
-  const [recorderPath, setRecorderPath] = useState("");
-  const [formatStates, setFormatStates] = useState<{ eiva: any; recorder: any }>({ eiva: null, recorder: null });
-  const [formatOverrides, setFormatOverrides] = useState<{ eiva: any; recorder: any }>({ eiva: null, recorder: null });
-  const [formatDetails, setFormatDetails] = useState<"eiva" | "recorder" | null>(null);
+  const [referencePath, setReferencePath] = useState("");
+  const [targetPath, setTargetPath] = useState("");
+  const [formatStates, setFormatStates] = useState<{ reference: any; target: any }>({ reference: null, target: null });
+  const [formatOverrides, setFormatOverrides] = useState<{ reference: any; target: any }>({ reference: null, target: null });
+  const [formatDetails, setFormatDetails] = useState<Role | null>(null);
   const [correctionDetailsOpen, setCorrectionDetailsOpen] = useState(false);
   const [shotIntervalText, setShotIntervalText] = useState("3.125");
   const [analysis, setAnalysis] = useState<AnalysisSuccess | null>(null);
@@ -212,46 +211,43 @@ export default function App() {
   }, [analysis]);
   useEffect(() => {
     if (!diagnosticsEnabled) return;
-    window.shotlogfixerTest = { setFiles: (eivaPath, recorderPath) => { setEivaPath(eivaPath); setRecorderPath(recorderPath); } };
+    window.shotlogfixerTest = { setFiles: (reference, target) => { setReferencePath(reference); setTargetPath(target); } };
     return () => { delete window.shotlogfixerTest; };
   }, []);
 
   const records = analysis?.records || EMPTY_RECORDS;
-  const problemGroups = useMemo(() => ({
-    EIVA_ONLY: statusIndices(records, "EIVA_ONLY"),
-    NO_SHOT: statusIndices(records, "NO_SHOT"),
-    RECORDER_INVALID: statusIndices(records, "RECORDER_INVALID"),
-    REVIEW: statusIndices(records, "REVIEW"),
-  }), [records]);
-  const [navCurrent, setNavCurrent] = useState<Record<string, number | null>>({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null });
-  const jumpTargets = useMemo(() => ffidJumpTargets(records, analysis?.ffid_jumps || []), [analysis, records]);
+  const problemGroups = useMemo(() => groupIndices(records), [records]);
+  const [navCurrent, setNavCurrent] = useState<Record<GroupKey, number | null>>(EMPTY_NAV);
+  const jumpTargets = useMemo(() => ffidJumpTargets(records, analysis?.qc.ffid_jumps || []), [analysis, records]);
   const [jumpCurrent, setJumpCurrent] = useState<number | null>(null);
-  const [gapCurrent, setGapCurrent] = useState<number | null>(null);
-  const allColumns = useMemo(() => [...BASE_COLUMNS, ...(analysis?.eiva_headers || []).map((header) => ({ key: `eiva_raw:${header}`, label: `EIVA ${header}` }))], [analysis]);
+  const allColumns = useMemo(() => [...BASE_COLUMNS, ...(analysis?.target_headers || []).map((header) => ({ key: `target_raw:${header}`, label: `Target ${header}` }))], [analysis]);
   const shotInterval = Number(shotIntervalText.trim().replace(",", "."));
   const validShotInterval = Number.isFinite(shotInterval) && shotInterval > 0;
   const analysisStale = Boolean(analysis && (!validShotInterval || analysis.parameters.shot_interval_m !== shotInterval));
-  const profileStale = Boolean(analysis && ((formatStates.eiva?.profile?.profile_hash && analysis.input_formats?.eiva?.profile_hash !== formatStates.eiva.profile.profile_hash) || (formatStates.recorder?.profile?.profile_hash && analysis.input_formats?.recorder?.profile_hash !== formatStates.recorder.profile.profile_hash)));
-  const formatBlocked = Boolean(formatStates.eiva?.profile?.confidence === "Unresolved" || formatStates.recorder?.profile?.confidence === "Unresolved" || formatStates.eiva?.validation?.valid === false || formatStates.recorder?.validation?.valid === false);
-  const formatNeedsReview = Boolean(!formatOverrides.eiva && formatStates.eiva?.profile?.confidence === "Review recommended" || !formatOverrides.recorder && formatStates.recorder?.profile?.confidence === "Review recommended");
+  const profileStale = Boolean(analysis && ((formatStates.reference?.profile?.profile_hash && analysis.input_formats?.reference?.profile_hash !== formatStates.reference.profile.profile_hash) || (formatStates.target?.profile?.profile_hash && analysis.input_formats?.target?.profile_hash !== formatStates.target.profile.profile_hash)));
+  const formatBlocked = Boolean(formatStates.reference?.profile?.confidence === "Unresolved" || formatStates.target?.profile?.confidence === "Unresolved" || formatStates.reference?.validation?.valid === false || formatStates.target?.validation?.valid === false);
+  const formatNeedsReview = Boolean(!formatOverrides.reference && formatStates.reference?.profile?.confidence === "Review recommended" || !formatOverrides.target && formatStates.target?.profile?.confidence === "Review recommended");
   useEffect(() => {
     let cancelled = false;
-    const inspect = async (path: string, inputType: "EIVA" | "RECORDER", key: "eiva" | "recorder") => {
+    const inspect = async (path: string, inputType: "EIVA" | "RECORDER", key: Role) => {
       if (!path) { setFormatStates((current) => ({ ...current, [key]: null })); return; }
       try {
         const response = await window.shotlogfixer.inspectFormat(path, inputType);
         if (!cancelled) setFormatStates((current) => ({ ...current, [key]: response.ok ? response : { error: response.error?.detail || response.error?.message || "Format detection failed" } }));
       } catch { if (!cancelled) setFormatStates((current) => ({ ...current, [key]: { error: "Format detection failed" } })); }
     };
-    void inspect(eivaPath, "EIVA", "eiva"); void inspect(recorderPath, "RECORDER", "recorder");
+    void inspect(referencePath, "RECORDER", "reference"); void inspect(targetPath, "EIVA", "target");
     return () => { cancelled = true; };
-  }, [eivaPath, recorderPath]);
+  }, [referencePath, targetPath]);
 
   const focusRecord = (index: number) => {
     if (!records[index]) return;
     setSelectedIndex(index);
-    const status = records[index].status;
-    if (status !== "MATCHED") setNavCurrent((current) => ({ ...current, [status]: index }));
+    setNavCurrent((current) => {
+      const next = { ...current };
+      for (const key of GROUP_KEYS) if (problemGroups[key].includes(index)) next[key] = index;
+      return next;
+    });
     const jump = jumpTargets.indexOf(index);
     if (jump >= 0) setJumpCurrent(jump);
     const viewport = tableViewportRef.current;
@@ -263,23 +259,23 @@ export default function App() {
     const timeline = timelineRef.current;
     if (timeline) {
       const trackWidth = Math.max(1400, records.length * 5);
-      const x = timelineMarkerX(records[index], trackWidth, analysis?.summary.eiva_rows || records.length);
+      const x = timelineMarkerX(records[index], trackWidth, analysis?.summary.target_rows || records.length);
       timeline.scrollTo({ left: Math.max(0, x - timeline.clientWidth / 2), behavior: "auto" });
     }
   };
 
-  const navigate = (status: "EIVA_ONLY" | "NO_SHOT" | "RECORDER_INVALID" | "REVIEW", step: 1 | -1) => {
-    const next = nextCycle(problemGroups[status], navCurrent[status], step);
+  const navigate = (group: GroupKey, step: 1 | -1) => {
+    const next = nextCycle(problemGroups[group], navCurrent[group], step);
     if (next === null) return;
-    setNavCurrent((current) => ({ ...current, [status]: next }));
+    setNavCurrent((current) => ({ ...current, [group]: next }));
     focusRecord(next);
   };
 
-  const focusIssue = (status: "EIVA_ONLY" | "NO_SHOT" | "RECORDER_INVALID" | "REVIEW") => {
-    const current = navCurrent[status];
-    const target = current !== null && problemGroups[status].includes(current) ? current : nextCycle(problemGroups[status], null, 1);
+  const focusIssue = (group: GroupKey) => {
+    const current = navCurrent[group];
+    const target = current !== null && problemGroups[group].includes(current) ? current : nextCycle(problemGroups[group], null, 1);
     if (target === null) return;
-    setNavCurrent((state) => ({ ...state, [status]: target }));
+    setNavCurrent((state) => ({ ...state, [group]: target }));
     focusRecord(target);
   };
 
@@ -295,22 +291,10 @@ export default function App() {
     else navigateJump(1);
   };
 
-  const focusGap = (index: number) => {
-    const gap = analysis?.recorder_gaps[index];
-    if (!gap) return;
-    setGapCurrent(index);
-    const target = gap.eiva_only_indices[0] ?? gap.right_eiva_source_index ?? gap.left_eiva_source_index;
-    if (target !== null && target !== undefined) focusRecord(target);
-  };
-  const navigateGap = (step: 1 | -1) => {
-    const next = nextCycle(analysis?.recorder_gaps.map((_, index) => index) || [], gapCurrent, step);
-    if (next !== null) focusGap(next);
-  };
-
-  const chooseFile = async (kind: "eiva" | "recorder") => {
+  const chooseFile = async (role: Role) => {
     try {
-      const selected = kind === "eiva" ? await window.shotlogfixer.selectEivaFile() : await window.shotlogfixer.selectRecorderFile();
-      if (selected) { if (kind === "eiva") { setEivaPath(selected); setFormatOverrides((current) => ({ ...current, eiva: null })); } else { setRecorderPath(selected); setFormatOverrides((current) => ({ ...current, recorder: null })); } }
+      const selected = role === "reference" ? await window.shotlogfixer.selectReferenceFile() : await window.shotlogfixer.selectTargetFile();
+      if (selected) { if (role === "reference") { setReferencePath(selected); setFormatOverrides((current) => ({ ...current, reference: null })); } else { setTargetPath(selected); setFormatOverrides((current) => ({ ...current, target: null })); } }
     } catch { setError("The file picker could not be opened."); setLifecycle("failed"); }
   };
 
@@ -320,54 +304,44 @@ export default function App() {
     setError("");
     if (!validShotInterval) { setError("Enter a finite positive Shot Interval before analysing."); setLifecycle("failed"); return; }
     if (formatBlocked || formatNeedsReview) { setError(formatBlocked ? "Format not ready — configure the input mapping before analysing." : "Format needs review — open Configure and confirm the interpretation before analysing."); setLifecycle("failed"); return; }
-    if (!eivaPath && !recorderPath) { setError("Select both an EIVA log and a recorder log before analysing."); setLifecycle("failed"); return; }
-    if (!eivaPath) { setError("Select an EIVA log before analysing."); setLifecycle("failed"); return; }
-    if (!recorderPath) { setError("Select a recorder log before analysing."); setLifecycle("failed"); return; }
+    if (!referencePath && !targetPath) { setError("Select both a reference (recorder) log and a target (EIVA) log before analysing."); setLifecycle("failed"); return; }
+    if (!referencePath) { setError("Select a reference (recorder) log before analysing."); setLifecycle("failed"); return; }
+    if (!targetPath) { setError("Select a target (EIVA) log before analysing."); setLifecycle("failed"); return; }
     setAnalysis(null); setSelectedIndex(null); setLifecycle("running");
     try {
       diagnosticPhase("analyse-ipc-invoke-start");
-      const response = await window.shotlogfixer.analyseFiles(eivaPath, recorderPath, shotInterval, formatOverrides.eiva, formatOverrides.recorder);
+      const response = await window.shotlogfixer.analyseFiles(referencePath, targetPath, shotInterval, formatOverrides.reference, formatOverrides.target);
       diagnosticPhase("analyse-ipc-promise-resolved");
       markTiming("python-response-received", "analyse-request-start");
       if (diagnosticsEnabled) diagnosticPhase(`analyse-response-known:${JSON.stringify(response).length}-bytes`);
       if (!response.ok) { setError(errorMessage(response)); setLifecycle("failed"); return; }
-      setAnalysis(response); if (response.input_formats) setFormatStates({ eiva: { ok: true, profile: response.input_formats.eiva, validation: { valid: true, usable_rows: response.summary.eiva_rows, data_rows: response.summary.eiva_rows } }, recorder: { ok: true, profile: response.input_formats.recorder, validation: { valid: true, usable_rows: response.summary.recorder_rows, data_rows: response.summary.recorder_rows } } }); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent({ EIVA_ONLY: null, NO_SHOT: null, RECORDER_INVALID: null, REVIEW: null }); setJumpCurrent(null); setGapCurrent(null); setLifecycle("done");
+      setAnalysis(response); if (response.input_formats) setFormatStates({ reference: { ok: true, profile: response.input_formats.reference, validation: { valid: true, usable_rows: response.summary.reference_rows, data_rows: response.summary.reference_rows } }, target: { ok: true, profile: response.input_formats.target, validation: { valid: true, usable_rows: response.summary.target_rows, data_rows: response.summary.target_rows } } }); diagnosticPhase("analyse-setAnalysis-called"); setVisibleColumns(DEFAULT_COLUMNS); setNavCurrent(EMPTY_NAV); setJumpCurrent(null); setLifecycle("done");
     } catch { setError("The Python engine could not be reached."); setLifecycle("failed"); }
   };
 
   const exportQc = async () => {
     if (!analysis || analysisStale || profileStale) { setError("Analysis settings changed — re-analyse before exporting QC."); return; }
     try {
-      const outputPath = await window.shotlogfixer.selectQcExportPath(eivaPath);
+      const outputPath = await window.shotlogfixer.selectQcExportPath(targetPath);
       if (!outputPath) return;
-      const response = await window.shotlogfixer.exportQc(eivaPath, recorderPath, outputPath, shotInterval, analysis.input_hashes, analysis.input_formats?.eiva, analysis.input_formats?.recorder);
+      const response = await window.shotlogfixer.exportQc(referencePath, targetPath, outputPath, shotInterval, analysis.input_hashes, analysis.input_formats?.reference, analysis.input_formats?.target);
       if (!response.ok) { setError(errorMessage(response)); return; }
       setToast("QC TXT exported successfully");
     } catch { setError("The QC TXT could not be exported."); }
   };
 
-  const correctionReady = Boolean(analysis && !analysisStale && !profileStale && analysis.correction.safe && analysis.validation.passed);
-  const correctionReasons = analysis ? (analysis.correction.blocking_reasons.length ? analysis.correction.blocking_reasons : analysis.validation.errors) : [];
-  const saveFixedEiva = async () => {
+  // Correction and QC are separate: only structural blockers (correction.safe) gate the corrected copy.
+  const correctionReady = Boolean(analysis && !analysisStale && !profileStale && analysis.correction.safe);
+  const correctionBlockers = analysis?.correction.blockers.length ? analysis.correction.blockers : analysis ? analysis.validation.errors.map((message) => ({ code: "VALIDATION", message })) : [];
+  const saveCorrected = async () => {
     if (!analysis || !correctionReady) return;
     try {
-      const outputPath = await window.shotlogfixer.selectFixedEivaPath(eivaPath);
+      const outputPath = await window.shotlogfixer.selectCorrectedTargetPath(targetPath);
       if (!outputPath) return;
-      const response = await window.shotlogfixer.saveFixedEiva(eivaPath, recorderPath, outputPath, shotInterval, analysis.input_hashes, analysis.input_formats?.eiva, analysis.input_formats?.recorder);
+      const response = await window.shotlogfixer.saveCorrectedTarget(referencePath, targetPath, outputPath, shotInterval, analysis.input_hashes, analysis.input_formats?.reference, analysis.input_formats?.target);
       if (!response.ok) { setError(errorMessage(response)); return; }
-      setToast("Fixed EIVA saved successfully");
-    } catch { setError("The fixed EIVA file could not be saved."); }
-  };
-
-  const saveFixedPair = async () => {
-    if (!analysis || !correctionReady) return;
-    try {
-      const outputs = await window.shotlogfixer.selectFixedPairPath(eivaPath, recorderPath);
-      if (!outputs) return;
-      const response = await window.shotlogfixer.saveFixedPair(eivaPath, recorderPath, outputs.eivaPath, outputs.recorderPath, shotInterval, analysis.input_hashes, analysis.input_formats?.eiva, analysis.input_formats?.recorder);
-      if (!response.ok) { setError(errorMessage(response)); return; }
-      setToast("Fixed pair created; original files unchanged");
-    } catch { setError("The fixed pair could not be saved."); }
+      setToast("Corrected copy saved; source files unchanged");
+    } catch { setError("The corrected copy could not be saved."); }
   };
 
   const handleTimelineScroll = () => setTimelineLeft(timelineRef.current?.scrollLeft || 0);
@@ -407,41 +381,26 @@ export default function App() {
     if (!timelineRef.current) return;
     const x = timelineLogicalX(event.clientX, timelineRef.current.getBoundingClientRect().left + timelineRef.current.clientLeft, timelineRef.current.scrollLeft);
     const markerIndex = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
-    if (markerIndex !== null) { focusRecord(markerIndex); return; }
-    const gapIndex = (analysis?.recorder_gaps || []).findIndex((gap) => {
-      const left = gap.left_eiva_source_index == null ? 0 : timelineMarkerX(records[gap.left_eiva_source_index], timelineTrackWidth, timelineTotal);
-      const right = gap.right_eiva_source_index == null ? left : timelineMarkerX(records[gap.right_eiva_source_index], timelineTrackWidth, timelineTotal);
-      return x >= Math.min(left, right) && x <= Math.max(left, right);
-    });
-    if (gapIndex >= 0) { focusGap(gapIndex); return; }
-    const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
-    if (index !== null) focusRecord(index);
+    if (markerIndex !== null) focusRecord(markerIndex);
   };
   const handleTimelineMove = (event: MouseEvent<HTMLCanvasElement>) => {
     if (!timelineRef.current || !records.length) return;
     if (dragRef.current.active && dragRef.current.moved) return;
     const x = timelineLogicalX(event.clientX, timelineRef.current.getBoundingClientRect().left + timelineRef.current.clientLeft, timelineRef.current.scrollLeft);
-    const gap = (analysis?.recorder_gaps || []).find((candidate) => {
-      const left = candidate.left_eiva_source_index == null ? 0 : timelineMarkerX(records[candidate.left_eiva_source_index], timelineTrackWidth, timelineTotal);
-      const right = candidate.right_eiva_source_index == null ? left : timelineMarkerX(records[candidate.right_eiva_source_index], timelineTrackWidth, timelineTotal);
-      return x >= Math.min(left, right) && x <= Math.max(left, right);
-    });
-    if (gap) {
-      setTimelineTooltip({ x: event.clientX - timelineRef.current.getBoundingClientRect().left, y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7,
-        text: `Recorder Gap\n${gap.left_recorder_ffid} → ${gap.right_recorder_ffid}\n${gap.distance_m.toFixed(3)} m | ${gap.gap_span_steps} span steps\n${gap.estimated_missing_positions} estimated missing intermediate positions\n${gap.explicit_no_shot_count} explicit not-recorded rows | ${gap.unexplained_missing_positions} unexplained\n${formatGapClassification(gap.classification)}\n${formatDiagnostic(gap.diagnostic)}` });
-      return;
-    }
     const index = timelineRecordIndexAtX(records, x, timelineTrackWidth, timelineTotal);
     if (index === null) { setTimelineTooltip(null); return; }
     const record = records[index];
-    const jump = analysis?.ffid_jumps.find((_, jumpIndex) => jumpTargets[jumpIndex] === index);
-    const jumpDetail = jump ? `\nFFID jump ${jump.from} → ${jump.to}` : "";
-    setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: (record.status === "MATCHED" ? `EIVA ${record.eiva_ffid || "—"} → Recorder ${record.recorder_ffid || "—"}\n${record.distance_m?.toFixed(3) || "—"} m` : `EIVA ${record.eiva_ffid || "—"}\n${formatRecordStatus(record.status)}`) + jumpDetail });
+    const jump = analysis?.qc.ffid_jumps.find((candidate) => candidate.row_id === record.id);
+    const jumpDetail = jump ? `\nRecorder FFID ${jump.kind === "REVERSAL" ? "decreases" : "jumps"} ${jump.from} → ${jump.to}` : "";
+    const text = record.association === "ASSIGNED"
+      ? `Recorder ${record.reference_ffid} → Target ${record.target_ffid}\nCorrected FFID ${record.corrected_ffid}\n${getCellValue(record, "distance")} m · ${getCellValue(record, "qc")}`
+      : `${formatAssociation(record.association)}\n${record.target_ffid ? `Target ${record.target_ffid}` : `Recorder ${record.reference_ffid}`}`;
+    setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: text + jumpDetail });
   };
   const handleTimelineLeave = () => setTimelineTooltip(null);
 
   const timelineTrackWidth = Math.max(1400, records.length * 5);
-  const timelineTotal = analysis?.summary.eiva_rows || records.length;
+  const timelineTotal = analysis?.summary.target_rows || records.length;
   useEffect(() => {
     const canvas = timelineCanvasRef.current;
     if (!canvas || ["no-timeline", "no-visualizations", "header-only"].includes(isolation)) return;
@@ -450,23 +409,16 @@ export default function App() {
     if (!context) return;
     const styles = getComputedStyle(document.documentElement);
     diagnosticPhase("timeline-style-read");
-    const colors: Record<string, string> = { MATCHED: styles.getPropertyValue("--matched"), EIVA_ONLY: styles.getPropertyValue("--eiva-only"), REVIEW: styles.getPropertyValue("--review"), RECORDER_INVALID: styles.getPropertyValue("--invalid"), NO_SHOT: styles.getPropertyValue("--review") };
+    const colors: Record<string, string> = { ok: styles.getPropertyValue("--matched"), warning: styles.getPropertyValue("--review"), severe: styles.getPropertyValue("--invalid"), "target-only": styles.getPropertyValue("--target-only"), invalid: styles.getPropertyValue("--invalid") };
     context.clearRect(0, 0, timelineTrackWidth, 60);
     context.strokeStyle = styles.getPropertyValue("--border"); context.globalAlpha = 1; context.lineWidth = 1; context.beginPath(); context.moveTo(0, 30.5); context.lineTo(timelineTrackWidth, 30.5); context.stroke();
-    (analysis?.recorder_gaps || []).forEach((gap) => {
-      if (gap.left_eiva_source_index == null || gap.right_eiva_source_index == null) return;
-      const left = timelineMarkerX(records[gap.left_eiva_source_index], timelineTrackWidth, timelineTotal);
-      const right = timelineMarkerX(records[gap.right_eiva_source_index], timelineTrackWidth, timelineTotal);
-      context.globalAlpha = gap.blocks_correction ? .28 : .18;
-      context.fillStyle = gap.blocks_correction ? styles.getPropertyValue("--invalid") : styles.getPropertyValue("--review");
-      context.fillRect(Math.min(left, right), 22, Math.max(3, Math.abs(right - left)), 17);
-    });
     records.forEach((record, index) => {
       const x = timelineMarkerX(record, timelineTrackWidth, timelineTotal);
       const selected = selectedIndex === index;
-      context.globalAlpha = record.status === "MATCHED" ? .55 : 1;
-      context.fillStyle = colors[record.status] || colors.MATCHED;
-      context.fillRect(x - (selected ? 3 : 1.5), selected ? 8 : (record.status === "MATCHED" ? 18 : 14), selected ? 6 : (record.status === "MATCHED" ? 2 : 5), selected ? 44 : (record.status === "MATCHED" ? 25 : 31));
+      const tone = recordTone(record);
+      context.globalAlpha = tone === "ok" ? .55 : 1;
+      context.fillStyle = colors[tone] || colors.ok;
+      context.fillRect(x - (selected ? 3 : 1.5), selected ? 8 : (tone === "ok" ? 18 : 14), selected ? 6 : (tone === "ok" ? 2 : 5), selected ? 44 : (tone === "ok" ? 25 : 31));
       if (selected) { context.strokeStyle = styles.getPropertyValue("--text"); context.lineWidth = 1; context.strokeRect(x - 4, 7, 8, 46); }
     });
     context.globalAlpha = 1;
@@ -476,7 +428,9 @@ export default function App() {
 
   const columns = useMemo(() => visibleColumns.map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
-    const width = key === "diagnostic" || key.startsWith("eiva_raw:") ? 220 : key.endsWith("coord") ? 220 : key === "status" ? 160 : 130;
+    // The eight default columns total ~1130 px so the QC column is visible in the default 1280 px window.
+    const fixedWidths: Record<string, number> = { reference_ffid: 105, target_ffid: 150, corrected_ffid: 115, reference_coord: 170, target_coord: 170, distance: 100, association: 110, qc: 215 };
+    const width = fixedWidths[key] ?? (key === "diagnostic" || key.startsWith("target_raw:") ? 220 : 130);
     return { id: key, header: spec.label, alignment: columnAlignment(key), width };
   }), [allColumns, visibleColumns]);
   const tableRecords = ["no-table", "no-visualizations", "header-only"].includes(isolation) ? [] : records;
@@ -484,6 +438,11 @@ export default function App() {
   const visibleStart = timelineTotal ? Math.min(timelineTotal, Math.floor((timelineLeft / timelineTrackWidth) * timelineTotal) + 1) : 0;
   const visibleCount = timelineRef.current ? Math.ceil((timelineRef.current.clientWidth / timelineTrackWidth) * timelineTotal) : 0;
   const visibleEnd = timelineTotal ? Math.min(timelineTotal, visibleStart + Math.max(1, visibleCount) - 1) : 0;
+  const distances = useMemo(() => records.flatMap((record) => record.association === "ASSIGNED" && record.distance_m !== null ? [record.distance_m] : []).sort((a, b) => a - b), [records]);
+  const medianDistance = distances.length ? distances[Math.floor(distances.length / 2)] : null;
+  const maxDistance = distances.length ? distances[distances.length - 1] : null;
+  const summary = analysis?.summary;
+  const counterTotal = (group: GroupKey) => problemGroups[group].length;
 
   return <div className="app-shell" data-diagnostics-isolation={isolation}>
     <header className="app-header">
@@ -493,43 +452,47 @@ export default function App() {
 
     <main>
       <section className="input-section" aria-label="Input files">
-        <div className="file-row"><label htmlFor="eiva-path">EIVA Log</label><input id="eiva-path" value={eivaPath ? basename(eivaPath) : "No file selected"} readOnly title={eivaPath} className={!eivaPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("eiva")}>Browse</button></div>
-        <div className="file-row"><label htmlFor="recorder-path">Recorder Log</label><input id="recorder-path" value={recorderPath ? basename(recorderPath) : "No file selected"} readOnly title={recorderPath} className={!recorderPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("recorder")}>Browse</button></div>
-        <FormatStatus kind="EIVA" state={formatStates.eiva} onConfigure={() => setFormatDetails("eiva")} />
-        <FormatStatus kind="RECORDER" state={formatStates.recorder} onConfigure={() => setFormatDetails("recorder")} />
-        <div className="shot-interval-row"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={shotIntervalText} onChange={(event) => setShotIntervalText(event.target.value)} aria-invalid={shotIntervalText.length > 0 && !validShotInterval} /><span className="unit">m</span><span className="tolerance-readout">Tolerance <b>{validShotInterval ? `${(shotInterval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></span></div>
+        <div className="file-row"><label htmlFor="reference-path" title="Authoritative: every valid record is a real shot and its FFID is the reference FFID">Reference (Recorder)</label><input id="reference-path" value={referencePath ? basename(referencePath) : "No file selected"} readOnly title={referencePath} className={!referencePath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("reference")}>Browse</button></div>
+        <div className="file-row"><label htmlFor="target-path" title="Corrected: a copy of this file receives the recorder FFIDs; unassigned rows are removed">Target (EIVA)</label><input id="target-path" value={targetPath ? basename(targetPath) : "No file selected"} readOnly title={targetPath} className={!targetPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("target")}>Browse</button></div>
+        <FormatStatus kind="RECORDER" state={formatStates.reference} onConfigure={() => setFormatDetails("reference")} />
+        <FormatStatus kind="EIVA" state={formatStates.target} onConfigure={() => setFormatDetails("target")} />
+        <div className="shot-interval-row"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={shotIntervalText} onChange={(event) => setShotIntervalText(event.target.value)} aria-invalid={shotIntervalText.length > 0 && !validShotInterval} /><span className="unit">m</span><span className="tolerance-readout" title="The shot interval sets QC distance bands only; it never rejects a recorder record">QC normal distance ≤ <b>{validShotInterval ? `${(shotInterval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></span></div>
         <div className="input-actions">
           <button className="button primary analyse-button" onClick={analyse} disabled={lifecycle === "running" || formatBlocked || formatNeedsReview}>{lifecycle === "running" ? "ANALYSING" : "ANALYSE"}</button>
           <div className="output-actions" aria-label="Output actions">
             <button className="button secondary compact-button" onClick={exportQc} disabled={!analysis || analysisStale || profileStale}><Icon name="download" />Export QC</button>
-            <button className="button secondary compact-button" onClick={saveFixedEiva} disabled={!correctionReady}>Save Fixed EIVA</button>
-            <button className="button primary compact-button" onClick={saveFixedPair} disabled={!correctionReady}>Save Fixed Pair</button>
+            <button className="button primary compact-button" onClick={saveCorrected} disabled={!correctionReady} title="Writes a corrected copy of the target file; the recorder file is never modified">Save Corrected EIVA</button>
           </div>
         </div>
       </section>
 
       {error && <div className="error-line" role="alert"><strong>{lifecycle === "failed" ? "Analysis issue" : "Export issue"}</strong><span>{error}</span></div>}
       {(analysisStale || profileStale) && <div className="stale-line" role="status"><strong>Analysis settings changed — re-analyse</strong><span>Output actions are disabled until Shot Interval and input format profiles match the analysed values.</span></div>}
-      {formatDetails && <FormatDialog kind={formatDetails === "eiva" ? "EIVA" : "RECORDER"} filePath={formatDetails === "eiva" ? eivaPath : recorderPath} state={formatStates[formatDetails]} onCancel={() => setFormatDetails(null)} onUse={(profile) => { const active = { ...profile, profile_hash: "" }; setFormatOverrides((current) => ({ ...current, [formatDetails]: active })); setFormatStates((current) => ({ ...current, [formatDetails]: { ...current[formatDetails], profile: active } })); setFormatDetails(null); }} onSave={(profile) => { const name = window.prompt("Save format profile as", profile?.name || "My format"); if (name) void window.shotlogfixer.saveFormatProfile(profile, name); }} />}
+      {formatDetails && <FormatDialog kind={formatDetails === "target" ? "EIVA" : "RECORDER"} filePath={formatDetails === "target" ? targetPath : referencePath} state={formatStates[formatDetails]} onCancel={() => setFormatDetails(null)} onUse={(profile) => { const active = { ...profile, profile_hash: "" }; setFormatOverrides((current) => ({ ...current, [formatDetails]: active })); setFormatStates((current) => ({ ...current, [formatDetails]: { ...current[formatDetails], profile: active } })); setFormatDetails(null); }} onSave={(profile) => { const name = window.prompt("Save format profile as", profile?.name || "My format"); if (name) void window.shotlogfixer.saveFormatProfile(profile, name); }} />}
 
       <section className="summary-section" aria-label="Analysis summary">
         <div className="summary-line">
-          <span className="summary-item">Matched <b>{analysis ? analysis.summary.matched : "—"}</b></span>
-          <Counter label={formatRecordStatus("EIVA_ONLY")} status="EIVA_ONLY" count={analysis?.summary.eiva_only} current={navCurrent.EIVA_ONLY} ordinal={problemGroups.EIVA_ONLY.indexOf(navCurrent.EIVA_ONLY ?? -1) + 1} total={problemGroups.EIVA_ONLY.length} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label={formatRecordStatus("NO_SHOT")} status="NO_SHOT" count={analysis ? analysis.summary.no_shot ?? 0 : undefined} current={navCurrent.NO_SHOT} ordinal={problemGroups.NO_SHOT.indexOf(navCurrent.NO_SHOT ?? -1) + 1} total={problemGroups.NO_SHOT.length} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label="Invalid" status="RECORDER_INVALID" count={analysis?.summary.recorder_invalid} current={navCurrent.RECORDER_INVALID} ordinal={problemGroups.RECORDER_INVALID.indexOf(navCurrent.RECORDER_INVALID ?? -1) + 1} total={problemGroups.RECORDER_INVALID.length} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label="Review" status="REVIEW" count={analysis?.summary.review} current={navCurrent.REVIEW} ordinal={problemGroups.REVIEW.indexOf(navCurrent.REVIEW ?? -1) + 1} total={problemGroups.REVIEW.length} onNavigate={navigate} onFocus={focusIssue} />
-          <GapCounter gaps={analysis?.recorder_gaps || []} current={gapCurrent} onFocus={focusGap} onNavigate={navigateGap} />
+          <span className="summary-item summary-assigned">Assigned <b>{summary ? summary.assigned : "—"}</b></span>
+          <Counter label="Target-only" group="TARGET_ONLY" count={summary ? counterTotal("TARGET_ONLY") : undefined} current={navCurrent.TARGET_ONLY} ordinal={problemGroups.TARGET_ONLY.indexOf(navCurrent.TARGET_ONLY ?? -1) + 1} total={counterTotal("TARGET_ONLY")} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label="Invalid" group="INVALID" count={summary ? counterTotal("INVALID") : undefined} current={navCurrent.INVALID} ordinal={problemGroups.INVALID.indexOf(navCurrent.INVALID ?? -1) + 1} total={counterTotal("INVALID")} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label="Blocked" group="BLOCKED" count={summary ? counterTotal("BLOCKED") : undefined} current={navCurrent.BLOCKED} ordinal={problemGroups.BLOCKED.indexOf(navCurrent.BLOCKED ?? -1) + 1} total={counterTotal("BLOCKED")} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label="QC severe" group="QC_SEVERE" count={summary ? counterTotal("QC_SEVERE") : undefined} current={navCurrent.QC_SEVERE} ordinal={problemGroups.QC_SEVERE.indexOf(navCurrent.QC_SEVERE ?? -1) + 1} total={counterTotal("QC_SEVERE")} onNavigate={navigate} onFocus={focusIssue} />
+          <Counter label="QC warnings" group="QC_WARNING" count={summary ? counterTotal("QC_WARNING") : undefined} current={navCurrent.QC_WARNING} ordinal={problemGroups.QC_WARNING.indexOf(navCurrent.QC_WARNING ?? -1) + 1} total={counterTotal("QC_WARNING")} onNavigate={navigate} onFocus={focusIssue} />
         </div>
-        <div className="summary-detail"><span>Total issues: <b>{analysis ? analysis.summary.total_issues : "—"}</b></span><JumpNavigation jumps={analysis?.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} /></div>
+        <div className="summary-detail">
+          <span title="Observations for a human to inspect. They never change an association and never block the corrected copy.">QC notes: <b>{summary ? summary.qc_info.toLocaleString() : "—"}</b></span>
+          <Counter label="Recorder position jumps" group="POSITION_JUMP" count={summary ? counterTotal("POSITION_JUMP") : undefined} current={navCurrent.POSITION_JUMP} ordinal={problemGroups.POSITION_JUMP.indexOf(navCurrent.POSITION_JUMP ?? -1) + 1} total={counterTotal("POSITION_JUMP")} onNavigate={navigate} onFocus={focusIssue} />
+          <JumpNavigation jumps={analysis?.qc.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} />
+          {summary && summary.reference_no_shot > 0 && <span>Recorder no-shot rows: <b>{summary.reference_no_shot}</b></span>}
+        </div>
         {analysis && <div className={`correction-line ${correctionReady ? "correction-ready" : "correction-blocked"}`}>
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
-            ? `${analysis.correction.retained.toLocaleString()} paired shots | ${analysis.summary.total_issues} issues resolved | Validation PASS`
-            : `${correctionReasons.length.toLocaleString()} blocking conditions require review. `}<button className="inline-details" onClick={() => setCorrectionDetailsOpen(true)} disabled={correctionReady}>View details</button></span>
+            ? `${analysis.correction.assigned.toLocaleString()} recorder records assigned · ${(analysis.correction.target_only_removed + analysis.correction.invalid_target_removed).toLocaleString()} target rows removed · corrected copy ${analysis.correction.corrected_rows.toLocaleString()} rows (expected ${analysis.correction.expected_rows.toLocaleString()}) · QC warnings do not block output`
+            : `${correctionBlockers.length.toLocaleString()} structural blocker${correctionBlockers.length === 1 ? "" : "s"}. `}<button className="inline-details" onClick={() => setCorrectionDetailsOpen(true)} disabled={correctionReady}>View details</button></span>
         </div>}
-        {analysis && correctionDetailsOpen && <CorrectionDetails reasons={correctionReasons} onClose={() => setCorrectionDetailsOpen(false)} />}
-        {analysis && <div className="correction-preview"><span>Retained / renumbered: <b>{analysis.correction.retained.toLocaleString()}</b></span><span>EIVA-only removed: <b>{analysis.correction.eiva_only_removed}</b></span><span>Not-recorded rows removed: <b>{analysis.correction.no_shot_removed}</b></span><span>Fixed pair rows: <b>{analysis.validation.fixed_eiva_rows.toLocaleString()}</b></span><span>FFID: <b>{analysis.validation.ffid_match_count}/{analysis.validation.ffid_pair_count}</b></span><span>Coordinates: <b>{analysis.validation.coordinate_pass_count}/{analysis.validation.ffid_pair_count}</b></span><span>Max EIVA–Recorder difference: <b>{analysis.validation.max_distance_m === null ? "—" : `${analysis.validation.max_distance_m.toFixed(3)} m`}</b></span></div>}
+        {analysis && correctionDetailsOpen && <CorrectionDetails blockers={correctionBlockers} onClose={() => setCorrectionDetailsOpen(false)} />}
+        {analysis && <div className="correction-preview"><span>Assigned: <b>{analysis.correction.assigned.toLocaleString()}</b></span><span>Target-only removed: <b>{analysis.correction.target_only_removed.toLocaleString()}</b></span><span>Corrected rows: <b>{analysis.validation.corrected_rows.toLocaleString()} / {analysis.validation.expected_rows.toLocaleString()}</b></span><span>FFIDs changed: <b>{analysis.validation.ffid_changed.toLocaleString()}</b> · unchanged: <b>{analysis.validation.ffid_unchanged.toLocaleString()}</b></span><span>Association distance: median <b>{medianDistance === null ? "—" : `${medianDistance.toFixed(3)} m`}</b> · max <b>{maxDistance === null ? "—" : `${maxDistance.toFixed(3)} m`}</b></span></div>}
       </section>
 
       <section className="timeline-section" aria-label="Acquisition timeline">
@@ -546,8 +509,8 @@ export default function App() {
           <table style={{ minWidth: columns.reduce((sum, column) => sum + column.width, 0) }}>
             <colgroup>{columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>
             <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} style={{ textAlign: column.alignment }}>{column.header}</th>)}</tr></thead>
-            <tbody>{tableRecords.map((record, index) => <tr key={record.id} data-index={index} data-selected={selectedIndex === index} data-status={record.status} onClick={() => focusRecord(index)}>
-              {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "status" ? `status-cell status-${record.status.toLowerCase()}` : undefined}>{getCellValue(record, column.id)}</td>)}
+            <tbody>{tableRecords.map((record, index) => <tr key={record.id} data-index={index} data-selected={selectedIndex === index} data-status={record.association} onClick={() => focusRecord(index)}>
+              {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "association" ? `status-cell status-${record.association.toLowerCase()}` : column.id === "qc" ? `qc-cell qc-${record.qc_severity.toLowerCase()}` : undefined} title={column.id === "qc" || column.id === "diagnostic" ? record.diagnostic : undefined}>{getCellValue(record, column.id)}</td>)}
             </tr>)}</tbody>
           </table>
           {!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}
@@ -559,24 +522,13 @@ export default function App() {
   </div>;
 }
 
-type NavigationStatus = "EIVA_ONLY" | "NO_SHOT" | "RECORDER_INVALID" | "REVIEW";
-
-function Counter({ label, status, count, current, ordinal, total, onNavigate, onFocus }: { label: string; status: NavigationStatus; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (status: NavigationStatus, step: 1 | -1) => void; onFocus: (status: NavigationStatus) => void }) {
-  return <EventNavigation className={`summary-${status.toLowerCase()}`} label={label} value={count ?? "—"} total={total} ordinal={current === null ? 1 : ordinal} onFocus={() => onFocus(status)} onNavigate={(step) => onNavigate(status, step)} />;
+function Counter({ label, group, count, current, ordinal, total, onNavigate, onFocus }: { label: string; group: GroupKey; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (group: GroupKey, step: 1 | -1) => void; onFocus: (group: GroupKey) => void }) {
+  return <EventNavigation className={`summary-${group.toLowerCase()}`} label={label} value={count ?? "—"} total={total} ordinal={current === null ? 1 : ordinal} onFocus={() => onFocus(group)} onNavigate={(step) => onNavigate(group, step)} />;
 }
 
-function GapCounter({ gaps, current, onFocus, onNavigate }: { gaps: RecorderGapEvent[]; current: number | null; onFocus: (index: number) => void; onNavigate: (step: 1 | -1) => void }) {
-  const gap = gaps[current ?? 0];
-  return <span className="summary-item summary-recorder-gap">
-    {gaps.length ? <button className="summary-trigger" onClick={() => onFocus(current ?? 0)}>Recorder Gaps <b>{gaps.length}</b></button> : <>Recorder Gaps <b>0</b></>}
-    {gaps.length > 1 && <span className="counter-nav"><button className="icon-button" onClick={() => onNavigate(-1)} title="Previous Recorder gap"><Icon name="left" /></button><span>{(current ?? 0) + 1} / {gaps.length}</span><button className="icon-button" onClick={() => onNavigate(1)} title="Next Recorder gap"><Icon name="right" /></button></span>}
-    {gap && <span className="gap-classification" title={formatDiagnostic(gap.diagnostic)}>{formatGapClassification(gap.classification)}</span>}
-  </span>;
-}
-
-function JumpNavigation({ jumps, current, targets, onFocus, onNavigate }: { jumps: Array<{ from: string; to: string }>; current: number | null; targets: Array<number | null>; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
+function JumpNavigation({ jumps, current, targets, onFocus, onNavigate }: { jumps: Array<{ from: number | null; to: number | null }>; current: number | null; targets: Array<number | null>; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
   return <span className="jump-navigation">
-    <EventNavigation label="FFID Jumps" value={jumps.length} total={targets.some((target) => target !== null) ? jumps.length : 0} ordinal={(current ?? 0) + 1} onFocus={onFocus} onNavigate={onNavigate} />
+    <EventNavigation label="Recorder FFID jumps" value={jumps.length} total={targets.some((target) => target !== null) ? jumps.length : 0} ordinal={(current ?? 0) + 1} onFocus={onFocus} onNavigate={onNavigate} />
   </span>;
 }
 

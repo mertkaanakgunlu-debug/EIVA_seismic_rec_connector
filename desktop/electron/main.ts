@@ -113,10 +113,11 @@ function attachRendererDiagnostics(window: BrowserWindow) {
   });
 }
 
-ipcMain.handle("select-file", async (_event, kind: "eiva" | "recorder") => {
+// The reference input is the authoritative recorder log; the target input is the EIVA log that gets corrected.
+ipcMain.handle("select-file", async (_event, kind: "reference" | "target") => {
   const result = await dialog.showOpenDialog({
     properties: ["openFile"],
-    title: kind === "eiva" ? "Select EIVA log" : "Select recorder log",
+    title: kind === "reference" ? "Select reference (recorder) log" : "Select target (EIVA) log to correct",
     filters: [{ name: "Log files", extensions: ["txt", "csv", "log"] }, { name: "All files", extensions: ["*"] }],
   });
   return result.canceled ? null : result.filePaths[0] || null;
@@ -133,10 +134,10 @@ ipcMain.on("renderer-heartbeat", (_event, snapshot: Record<string, unknown>) => 
 
 ipcMain.handle("get-renderer-heartbeat", () => lastHeartbeat);
 
-ipcMain.handle("analyse-files", (_event, payload: { eivaPath: string; recorderPath: string; shotIntervalM: number; eivaProfile?: unknown; recorderProfile?: unknown }) => {
-  diagnosticLog("analyse: ipc-request-received", { eivaPath: payload.eivaPath, recorderPath: payload.recorderPath });
+ipcMain.handle("analyse-files", (_event, payload: { referencePath: string; targetPath: string; shotIntervalM: number; referenceProfile?: unknown; targetProfile?: unknown }) => {
+  diagnosticLog("analyse: ipc-request-received", { referencePath: payload.referencePath, targetPath: payload.targetPath });
   const started = performance.now();
-  return runEngine({ action: "analyse", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, shot_interval_m: payload.shotIntervalM, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile }, "analyse").then((response) => {
+  return runEngine({ action: "analyse", reference_path: payload.referencePath, target_path: payload.targetPath, shot_interval_m: payload.shotIntervalM, reference_profile: payload.referenceProfile, target_profile: payload.targetProfile }, "analyse").then((response) => {
     diagnosticLog("analyse: ipc-response-returned", { durationMs: performance.now() - started });
     return response;
   });
@@ -151,8 +152,8 @@ ipcMain.handle("preview-format", (_event, payload: { path: string; inputType: "E
 ipcMain.handle("format-profiles", (_event, payload: { action: string; profile?: unknown; name?: string; profileId?: string }) =>
   runEngine({ action: payload.action, profile: payload.profile, name: payload.name, profile_id: payload.profileId }, "format-profile"));
 
-ipcMain.handle("select-qc-export-path", async (_event, payload: { eivaPath?: string }) => {
-  const defaultPath = payload?.eivaPath ? path.join(path.dirname(payload.eivaPath), `${path.parse(payload.eivaPath).name}_qc.txt`) : "shotlogfixer_qc.txt";
+ipcMain.handle("select-qc-export-path", async (_event, payload: { targetPath?: string }) => {
+  const defaultPath = payload?.targetPath ? path.join(path.dirname(payload.targetPath), `${path.parse(payload.targetPath).name}_qc.txt`) : "shotlogfixer_qc.txt";
   const result = await dialog.showSaveDialog({
     title: "Export QC TXT",
     defaultPath,
@@ -161,8 +162,8 @@ ipcMain.handle("select-qc-export-path", async (_event, payload: { eivaPath?: str
   return result.canceled ? null : result.filePath ? ensureTxtPath(result.filePath) : null;
 });
 
-ipcMain.handle("export-qc", (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string; shotIntervalM: number; expectedHashes?: unknown; eivaProfile?: unknown; recorderProfile?: unknown }) =>
-  runEngine({ action: "export_qc", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM, expected_hashes: payload.expectedHashes, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile }));
+ipcMain.handle("export-qc", (_event, payload: { referencePath: string; targetPath: string; outputPath: string; shotIntervalM: number; expectedHashes?: unknown; referenceProfile?: unknown; targetProfile?: unknown }) =>
+  runEngine({ action: "export_qc", reference_path: payload.referencePath, target_path: payload.targetPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM, expected_hashes: payload.expectedHashes, reference_profile: payload.referenceProfile, target_profile: payload.targetProfile }));
 
 function fixedStem(filePath: string) {
   const parsed = path.parse(filePath);
@@ -174,34 +175,23 @@ function ensureTxtPath(filePath: string) {
   return path.join(parsed.dir, `${parsed.name}.txt`);
 }
 
-ipcMain.handle("select-fixed-eiva-path", async (_event, payload: { eivaPath: string }) => {
-  const result = await dialog.showSaveDialog({ title: "Save Fixed EIVA", defaultPath: fixedStem(payload.eivaPath), filters: [{ name: "Text files", extensions: ["txt"] }] });
+// Correction writes one corrected COPY of the target (EIVA) file. The reference (recorder) file is never rewritten.
+ipcMain.handle("select-corrected-target-path", async (_event, payload: { targetPath: string }) => {
+  const result = await dialog.showSaveDialog({ title: "Save corrected copy of the target (EIVA) file", defaultPath: fixedStem(payload.targetPath), filters: [{ name: "Text files", extensions: ["txt"] }] });
   return result.canceled ? null : result.filePath ? ensureTxtPath(result.filePath) : null;
-});
-
-ipcMain.handle("select-fixed-pair-path", async (_event, payload: { eivaPath: string; recorderPath: string }) => {
-  const result = await dialog.showSaveDialog({ title: "Save Fixed Pair (choose EIVA file)", defaultPath: fixedStem(payload.eivaPath), filters: [{ name: "Text files", extensions: ["txt"] }] });
-  if (result.canceled || !result.filePath) return null;
-  const eivaPath = ensureTxtPath(result.filePath);
-  return { eivaPath, recorderPath: path.join(path.dirname(eivaPath), `${path.parse(payload.recorderPath).name}_fixed.txt`) };
 });
 
 async function confirmOverwrite(paths: string[]) {
   const existing = paths.filter((filePath) => filePath && existsSync(filePath));
   if (!existing.length) return true;
   const answer = await dialog.showMessageBox({ type: "warning", buttons: ["Cancel", "Overwrite"], defaultId: 0, cancelId: 0,
-    title: "Confirm overwrite", message: "A fixed output already exists.", detail: existing.join("\n") });
+    title: "Confirm overwrite", message: "A corrected output already exists.", detail: existing.join("\n") });
   return answer.response === 1;
 }
 
-ipcMain.handle("save-fixed-eiva", async (_event, payload: { eivaPath: string; recorderPath: string; outputPath: string; shotIntervalM: number; expectedHashes?: unknown; eivaProfile?: unknown; recorderProfile?: unknown }) => {
+ipcMain.handle("save-corrected-target", async (_event, payload: { referencePath: string; targetPath: string; outputPath: string; shotIntervalM: number; expectedHashes?: unknown; referenceProfile?: unknown; targetProfile?: unknown }) => {
   if (!(await confirmOverwrite([payload.outputPath]))) return { ok: false, error: { code: "SAVE_CANCELLED", message: "Save cancelled." } };
-  return runEngine({ action: "save_fixed_eiva", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM, overwrite: true, expected_hashes: payload.expectedHashes, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile });
-});
-
-ipcMain.handle("save-fixed-pair", async (_event, payload: { eivaPath: string; recorderPath: string; eivaOutput: string; recorderOutput: string; shotIntervalM: number; expectedHashes?: unknown; eivaProfile?: unknown; recorderProfile?: unknown }) => {
-  if (!(await confirmOverwrite([payload.eivaOutput, payload.recorderOutput]))) return { ok: false, error: { code: "SAVE_CANCELLED", message: "Save cancelled." } };
-  return runEngine({ action: "save_fixed_pair", eiva_path: payload.eivaPath, recorder_path: payload.recorderPath, eiva_output: payload.eivaOutput, recorder_output: payload.recorderOutput, shot_interval_m: payload.shotIntervalM, overwrite: true, expected_hashes: payload.expectedHashes, eiva_profile: payload.eivaProfile, recorder_profile: payload.recorderProfile });
+  return runEngine({ action: "save_corrected_target", reference_path: payload.referencePath, target_path: payload.targetPath, output_path: payload.outputPath, shot_interval_m: payload.shotIntervalM, overwrite: true, expected_hashes: payload.expectedHashes, reference_profile: payload.referenceProfile, target_profile: payload.targetProfile });
 });
 
 async function waitForFrames(window: BrowserWindow, count = 2) {
@@ -251,10 +241,11 @@ async function runSmoke(window: BrowserWindow) {
         app.exit(1);
         return;
       }
+      // SHOTLOGFIXER_SMOKE_RECORDER is the reference (recorder) log; SHOTLOGFIXER_SMOKE_EIVA is the target (EIVA) log.
       const smokeEiva = process.env.SHOTLOGFIXER_SMOKE_EIVA;
       const smokeRecorder = process.env.SHOTLOGFIXER_SMOKE_RECORDER;
       if (smokeEiva && smokeRecorder) {
-        await window.webContents.executeJavaScript(`window.shotlogfixerTest?.setFiles(...${JSON.stringify([smokeEiva, smokeRecorder])})`);
+        await window.webContents.executeJavaScript(`window.shotlogfixerTest?.setFiles(...${JSON.stringify([smokeRecorder, smokeEiva])})`);
         await waitForFrames(window);
         await window.webContents.executeJavaScript(`document.querySelector('.analyse-button')?.click()`);
         const analysisDone = await window.webContents.executeJavaScript(`new Promise((resolve) => { const started = performance.now(); const poll = () => { const text = document.querySelector('.app-footer')?.textContent || ''; if (/result rows/.test(text)) return resolve({ ok: true, text }); if (performance.now() - started > 20000) return resolve({ ok: false, text }); setTimeout(poll, 100); }; poll(); })`);
@@ -273,19 +264,18 @@ async function runSmoke(window: BrowserWindow) {
         if (smokeOutputDir) {
           mkdirSync(smokeOutputDir, { recursive: true });
           const qcPath = path.join(smokeOutputDir, "portable-smoke-qc.txt");
-          const fixedEivaPath = path.join(smokeOutputDir, "portable-smoke-eiva-fixed.txt");
-          const fixedRecorderPath = path.join(smokeOutputDir, "portable-smoke-recorder-fixed.txt");
-          const requestBase = { eiva_path: smokeEiva, recorder_path: smokeRecorder, shot_interval_m: 3.125 };
-          const [qc, fixedPair] = await Promise.all([
+          const correctedPath = path.join(smokeOutputDir, "portable-smoke-eiva-corrected.txt");
+          const requestBase = { reference_path: smokeRecorder, target_path: smokeEiva, shot_interval_m: 3.125 };
+          const [qc, corrected] = await Promise.all([
             runEngine({ action: "export_qc", ...requestBase, output_path: qcPath }, "smoke-export-qc"),
-            runEngine({ action: "save_fixed_pair", ...requestBase, eiva_output: fixedEivaPath, recorder_output: fixedRecorderPath, overwrite: true }, "smoke-save-fixed-pair"),
+            runEngine({ action: "save_corrected_target", ...requestBase, output_path: correctedPath, overwrite: true }, "smoke-save-corrected-target"),
           ]);
-          if (!qc.ok || !fixedPair.ok || !existsSync(qcPath) || !existsSync(fixedEivaPath) || !existsSync(fixedRecorderPath)) {
+          if (!qc.ok || !corrected.ok || !existsSync(qcPath) || !existsSync(correctedPath)) {
             console.error("Electron packaged smoke failed: bundled engine did not produce validated outputs.");
             app.exit(1);
             return;
           }
-          diagnosticLog("packaged-output-smoke-passed", { outputDir: smokeOutputDir, qcPath, fixedEivaPath, fixedRecorderPath });
+          diagnosticLog("packaged-output-smoke-passed", { outputDir: smokeOutputDir, qcPath, correctedPath });
         }
       }
       console.log("Electron smoke passed: actual ThemePicker, animation frames, heartbeat, Columns, and optional bundled-output checks verified.");
