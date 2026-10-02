@@ -124,7 +124,7 @@ describe("human-readable QC notes", () => {
   it("describes an unmatched recorder record by what the operator can observe", () => {
     const note = describeFinding({ code: "ASSOCIATION_BLOCKED", message: "... (it fits it better, 1.20 m) ...", metrics: { nearest_distance_m: 210.4, nearest_target_row: 12, shift_records: null, shift_cost_m: null } }, row({ reference_ffid: "6873" }));
     expect(note.text).toBe("Recorder FFID 6873 could not be matched to a nearby EIVA position.");
-    expect(note.detail).toContain("The nearest EIVA position is approximately 210 m away, so this recorder record was left unmatched for review.");
+    expect(note.detail).toContain("Its nearest EIVA position (about 210 m away) is already matched to another recorder shot or is out of shot order");
     expect(`${note.text} ${note.detail}`).not.toMatch(/fits it better/);
   });
 

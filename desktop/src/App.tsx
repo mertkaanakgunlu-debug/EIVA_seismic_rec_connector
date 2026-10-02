@@ -504,6 +504,8 @@ export default function App() {
   const handleHeaderPointerDown = (event: PointerEvent<HTMLTableCellElement>, key: string) => {
     if (event.button !== 0) return;
     columnDragRef.current = { key, x: event.clientX, started: false };
+    // Capture at once so the release always reaches this header, wherever the pointer ends up.
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const handleHeaderPointerMove = (event: PointerEvent<HTMLTableCellElement>) => {
     const drag = columnDragRef.current;
@@ -511,7 +513,6 @@ export default function App() {
     if (!drag.started) {
       if (Math.abs(event.clientX - drag.x) < 5) return;
       drag.started = true;
-      event.currentTarget.setPointerCapture(event.pointerId);
     }
     const viewport = tableViewportRef.current;
     if (viewport) {
@@ -592,7 +593,7 @@ export default function App() {
         <div className="summary-line">
           <span className="summary-item summary-matched" title="Recorder shots matched to an EIVA position">Matched <b>{summary ? summary.assigned.toLocaleString() : "—"}</b></span>
           {counter("EIVA-only", "TARGET_ONLY", "EIVA positions with no recorder shot; they are not in the corrected EIVA file")}
-          {counter("Needs review", "NEEDS_REVIEW", "Unmatched recorder shots and rows with a warning or severe QC finding")}
+          {counter("Needs review", "NEEDS_REVIEW", "Unmatched recorder shots and rows with a warning or severe QC finding; EIVA-only rows are counted separately")}
           <button ref={detailsButtonRef} className={`button secondary compact-button qc-details-button${detailsOpen ? " is-open" : ""}`} onClick={() => setDetailsOpen((open) => !open)} aria-haspopup="dialog" aria-expanded={detailsOpen} disabled={!analysis}>QC details<Icon name="chevron" /></button>
           {analysis && detailsOpen && <Popover anchorRef={detailsButtonRef} onClose={() => setDetailsOpen(false)} className="qc-details-panel" role="dialog" aria-label="QC details">
             <div className="qc-details-group">
@@ -651,7 +652,7 @@ export default function App() {
         <div className={`table-viewport${columnDrag ? " is-dragging-column" : ""}`} ref={tableViewportRef}>
           <table style={{ minWidth: columns.reduce((sum, column) => sum + column.width, 0) }}>
             <colgroup>{columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>
-            <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} className={columnDrag?.key === column.id ? "is-dragged" : undefined} style={{ textAlign: column.alignment }} tabIndex={0} title="Drag to reorder (Alt+← / Alt+→)" onPointerDown={(event) => handleHeaderPointerDown(event, column.id)} onPointerMove={handleHeaderPointerMove} onPointerUp={(event) => finishColumnDrag(event, true)} onPointerCancel={(event) => finishColumnDrag(event, false)} onKeyDown={(event) => handleHeaderKeyDown(event, column.id)}>{column.header}</th>)}</tr></thead>
+            <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} className={columnDrag?.key === column.id ? "is-dragged" : undefined} style={{ textAlign: column.alignment }} tabIndex={0} title="Drag to reorder (Alt+← / Alt+→)" onPointerDown={(event) => handleHeaderPointerDown(event, column.id)} onPointerMove={handleHeaderPointerMove} onPointerUp={(event) => finishColumnDrag(event, true)} onPointerCancel={(event) => finishColumnDrag(event, false)} onLostPointerCapture={() => { columnDragRef.current = null; setColumnDrag(null); }} onKeyDown={(event) => handleHeaderKeyDown(event, column.id)}>{column.header}</th>)}</tr></thead>
             <tbody>{tableRecords.map((record, index) => <tr key={record.id} data-index={index} data-selected={selectedIndex === index} data-status={record.association} onClick={() => focusRecord(index)}>
               {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "association" ? `status-cell status-${record.association.toLowerCase()}` : column.id === "qc" ? `qc-cell qc-${record.qc_severity.toLowerCase()}` : undefined} title={column.id === "qc" || column.id === "diagnostic" ? rowTitle(record) : undefined}>{column.id === "diagnostic" ? recordNote(record)?.text ?? "—" : getCellValue(record, column.id)}</td>)}
             </tr>)}</tbody>
@@ -692,6 +693,7 @@ function noteTitle(note: QcDescription, findings: QcFinding[], record?: EngineRe
   const lines = [findings.length ? null : [note.text, note.detail].filter(Boolean).join(" ")];
   for (const finding of findings) { const described = describeFinding(finding, record, shotInterval); lines.push([described.text, described.detail].filter(Boolean).join(" ")); }
   if (findings.length) lines.push(`Codes: ${findings.map((finding) => finding.code).join(", ")}`);
+  if (record?.diagnostic) lines.push(`Engine: ${record.diagnostic}`);
   return lines.filter(Boolean).join("\n");
 }
 

@@ -85,7 +85,7 @@ export function describeFinding(finding: Pick<QcFinding, "code" | "message" | "m
   switch (finding.code) {
     case "TARGET_ONLY": {
       const before = m.previous_reference_ffid, after = m.next_reference_ffid;
-      const where = before && after ? `It lies between recorder FFID ${before} and ${after}.` : before ? `It lies after recorder FFID ${before}, the last recorded shot.` : after ? `It lies before recorder FFID ${after}, the first recorded shot.` : undefined;
+      const where = before && after ? `It lies between recorder FFID ${before} and ${after}.` : before ? `It lies after recorder FFID ${before}, the last matched recorder shot.` : after ? `It lies before recorder FFID ${after}, the first matched recorder shot.` : undefined;
       const noShots = count(m.no_shot_rows);
       return { text: "EIVA position has no recorder counterpart. This row will not be included in the corrected EIVA file.", detail: [where, noShots ? `${plural(noShots, "recorder no-shot row")} ${noShots === 1 ? "lies" : "lie"} in the same gap.` : undefined].filter(Boolean).join(" ") || undefined };
     }
@@ -97,7 +97,7 @@ export function describeFinding(finding: Pick<QcFinding, "code" | "message" | "m
       const nearest = typeof m.nearest_distance_m === "number" ? m.nearest_distance_m : null;
       const shifted = count(m.shift_records);
       const detail = nearest !== null
-        ? `The nearest EIVA position is approximately ${roughMetres(nearest)} away${shifted ? `, and matching it would move ${plural(shifted, "other recorder record")} by one EIVA row` : ""}, so this recorder record was left unmatched for review.`
+        ? `Its nearest EIVA position (about ${roughMetres(nearest)} away) is already matched to another recorder shot or is out of shot order, and no free EIVA position lies between its neighbours${shifted ? `; making room would move ${plural(shifted, "other recorder record")} by one EIVA row` : ""}, so it was left unmatched for review.`
         : "No free EIVA position lies nearby in shot order, so this recorder record was left unmatched for review.";
       return { text: `${recorder} could not be matched to a nearby EIVA position.`, detail: `${detail} It is not in the corrected EIVA file.` };
     }
@@ -150,7 +150,7 @@ export function describeFinding(finding: Pick<QcFinding, "code" | "message" | "m
       return { text: "Other EIVA positions are about as close as the matched one.", detail: "The match that keeps shot order was used." };
     case "ASSOCIATION_NEAREST_OVERRIDDEN": {
       const nearest = metres(m.nearest_distance_m), assigned = metres(m.assigned_distance_m) ?? distance;
-      return { text: `A closer EIVA position${nearest ? ` (${nearest})` : ""} is matched to a neighbouring shot; this match is ${assigned ?? "further"} away.` };
+      return { text: `A closer EIVA position${nearest ? ` (${nearest})` : ""} was not used for this shot; this match is ${assigned ?? "further"} away.` };
     }
     case "ASSOCIATION_RUN_DISPLACED": {
       const records = count(m.records);
