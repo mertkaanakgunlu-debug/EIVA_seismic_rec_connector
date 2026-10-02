@@ -75,7 +75,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 h1, h2, p { margin: 0; }
 h1 { font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; font-weight: 650; }
 .app-header p { color: var(--muted); margin-top: 3px; font-size: 12px; }
-.header-actions { display: flex; align-items: center; gap: 18px; color: var(--muted); }
+.header-actions { display: flex; align-items: center; gap: 14px; color: var(--muted); }
+.settings-button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; font-size: 12px; }
+.settings-button:hover { border-color: var(--border-strong); background: var(--surface-raised); }
+.settings-button.is-invalid { border-color: var(--invalid); color: var(--invalid); }
+.settings-panel { width: 280px; padding: 12px; }
+.settings-panel strong { display: block; margin-bottom: 10px; font-size: 12px; }
+.settings-field { display: flex; align-items: center; gap: 8px; }
+.settings-field label { width: 92px; color: var(--text); font-weight: 600; }
+.settings-field input { width: 92px; height: 29px; padding: 0 8px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); font-variant-numeric: tabular-nums; }
+.settings-field input[aria-invalid="true"] { border-color: var(--invalid); }
+.settings-panel .tolerance-readout { margin: 9px 0 0; color: var(--muted); }
+.settings-note { margin-top: 8px !important; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .theme-picker { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
 .theme-picker-button { display: inline-flex; align-items: center; justify-content: space-between; gap: 14px; min-width: 91px; height: 30px; padding: 0 9px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
 .theme-picker-button:hover { border-color: var(--border-strong); background: var(--surface-raised); }
@@ -94,18 +105,20 @@ h1 { font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; font-weight: 65
 /* Content is centred at up to ~1444 px while the scrollbar (if any) stays at the window edge. */
 main { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 0 max(28px, calc((100% - 1444px) / 2)); }
 main > * { flex: none; }
-.input-section { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 14px; padding: 16px 0 17px; border-bottom: 1px solid var(--border); }
-.file-row { grid-column: 1; display: grid; grid-template-columns: 132px minmax(0, 1fr) auto; align-items: center; align-self: start; gap: 9px; min-width: 0; }
+/* Two columns: compact file rows ([file] [Browse] [gear]) on the left, the action stack on the right. */
+.input-section { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-auto-rows: auto; align-items: center; gap: 10px 14px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.file-row { grid-column: 1; display: grid; grid-template-columns: 132px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-width: 0; }
+/* The field is the visual box; the read-only path and its format badge share it. */
+.file-field { display: flex; align-items: center; gap: 6px; height: 32px; min-width: 0; padding-right: 5px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.file-field:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.icon-only-button { width: 34px; padding: 0; }
 .file-row label { color: var(--muted); font-size: 12px; }
-.file-row input { width: 100%; height: 32px; min-width: 0; padding: 0 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; text-overflow: ellipsis; }
+.file-row input { flex: 1 1 auto; width: 100%; height: 100%; min-width: 60px; padding: 0 10px; color: var(--text); background: transparent; border: 0; border-radius: var(--radius); overflow: hidden; text-overflow: ellipsis; }
+.file-row input:focus-visible { outline: none; }
 .file-row input.placeholder { color: var(--muted); }
-.input-actions { grid-column: 2; grid-row: 1 / span 4; align-self: start; display: flex; flex-direction: column; align-items: stretch; gap: 7px; min-width: 150px; }
-.shot-interval-row { grid-column: 1; display: flex; align-items: center; gap: 8px; min-height: 31px; color: var(--muted); font-size: 12px; }
-.shot-interval-row label { width: 98px; color: var(--text); font-weight: 600; }
-.shot-interval-row input { width: 92px; height: 29px; padding: 0 8px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); font-variant-numeric: tabular-nums; }
-.shot-interval-row input[aria-invalid="true"] { border-color: var(--invalid); }
-.shot-interval-row .unit { margin-left: -4px; }
-.tolerance-readout { margin-left: 12px; }
+.format-badge { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 60%; height: 22px; padding: 0 8px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.format-badge-name { overflow: hidden; text-overflow: ellipsis; }
+.input-actions { grid-column: 2; grid-row: 1 / span 2; align-self: start; display: flex; flex-direction: column; align-items: stretch; gap: 7px; min-width: 150px; }
 .tolerance-readout b { color: var(--text); font-variant-numeric: tabular-nums; }
 .analyse-button { min-width: 114px; min-height: 34px; }
 .output-actions { display: grid; gap: 5px; }
@@ -190,7 +203,7 @@ tbody tr[data-selected="true"] td { background: var(--selected); }
   main { padding: 0 16px; }
   .header-actions { gap: 10px; flex-direction: column-reverse; align-items: flex-end; }
   .input-section { grid-template-columns: 1fr; }
-  .file-row { grid-template-columns: 112px minmax(0, 1fr) auto; }
+  .file-row { grid-template-columns: 112px minmax(0, 1fr) auto auto; }
   .input-actions { grid-column: 1; grid-row: auto; }
   .summary-detail { flex-wrap: wrap; gap: 8px 18px; }
 }
@@ -198,9 +211,7 @@ tbody tr[data-selected="true"] td { background: var(--selected); }
 /* Short windows (e.g. a maximised 1366 x 768 laptop): tighten vertical rhythm so the QC table keeps usable height without page scrolling. */
 @media (max-height: 800px) {
   .app-header { padding-top: 10px; padding-bottom: 9px; }
-  .input-section { gap: 5px 14px; padding: 10px 0 11px; }
-  .format-status { min-height: 27px; }
-  .format-status .compact-button { min-height: 26px; }
+  .input-section { gap: 8px 14px; padding: 10px 0; }
   .summary-section { padding: 8px 0; }
   .summary-detail { margin-top: 6px; }
   .correction-line { margin-top: 7px; padding-top: 6px; }
@@ -211,18 +222,12 @@ tbody tr[data-selected="true"] td { background: var(--selected); }
   .table-viewport { min-height: 116px; }
 }
 
-.format-status { grid-column: 1; display: flex; align-items: center; gap: 10px; min-height: 30px; padding: 2px 0 2px 156px; color: var(--muted); font-size: 12px; }
-.format-status b { color: var(--text); font-weight: 600; }
-.format-detail { color: var(--muted); }
-.format-status .compact-button { margin-left: auto; }
 .format-dialog { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; background: color-mix(in srgb, #000 45%, transparent); }
 .format-dialog-inner h2 { margin: 0 0 8px; }
 .format-dialog-inner pre { padding: 12px; overflow: auto; background: var(--surface); color: var(--text); font-size: 11px; border-radius: var(--radius-sm); }
 .format-validation { color: var(--muted); }
 .format-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
-.format-role { color: var(--muted); font-size: 11px; }
-.format-state { font-size: 11px; font-weight: 600; }
 .format-ready { color: var(--matched); }
 .format-review { color: var(--review); }
 .format-dialog { padding: 18px; }
