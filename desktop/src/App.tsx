@@ -1,16 +1,16 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
-import { basename, columnAlignment, ffidJumpTargets, getCellValue, GROUP_KEYS, groupIndices, nextCycle, recordTone, resolveThemePreference, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX, type GroupKey } from "./lib/logic";
-import type { AnalysisResponse, AnalysisSuccess, CorrectionBlocker, EngineRecord, ExportResponse, FormatProfileSummary } from "./lib/types";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent } from "react";
+import { basename, columnAlignment, ffidJumpTargets, getCellValue, GROUP_KEYS, groupIndices, loadColumnOrder, mergeColumnOrder, moveColumn, nextCycle, orderedVisibleColumns, recordTone, resolveThemePreference, saveColumnOrder, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX, type GroupKey } from "./lib/logic";
+import type { AnalysisResponse, AnalysisSuccess, CorrectionBlocker, EngineRecord, ExportResponse, FormatProfileSummary, QcFinding } from "./lib/types";
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
-import { formatAssociation, formatBlocker } from "./lib/presentation";
+import { describeFinding, describeRecord, formatAssociation, formatBlocker, formatQcCode, type QcDescription } from "./lib/presentation";
 import { FloatingTooltip, Popover } from "./Popover";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
 type Role = "reference" | "target";
 const EMPTY_RECORDS: EngineRecord[] = [];
-const EMPTY_NAV: Record<GroupKey, number | null> = { TARGET_ONLY: null, INVALID: null, BLOCKED: null, QC_SEVERE: null, QC_WARNING: null, POSITION_JUMP: null };
+const EMPTY_NAV: Record<GroupKey, number | null> = { TARGET_ONLY: null, NEEDS_REVIEW: null, INVALID: null, BLOCKED: null, QC_SEVERE: null, QC_WARNING: null, POSITION_JUMP: null };
 
 function markTiming(name: string, start?: string) {
   if (!diagnosticsEnabled || typeof performance === "undefined") return;
@@ -23,21 +23,21 @@ function markTiming(name: string, start?: string) {
 const DEFAULT_COLUMNS = ["reference_ffid", "target_ffid", "corrected_ffid", "reference_coord", "target_coord", "distance", "association", "qc"];
 const BASE_COLUMNS: Array<{ key: string; label: string }> = [
   { key: "reference_ffid", label: "Recorder FFID" },
-  { key: "target_ffid", label: "Target Original FFID" },
+  { key: "target_ffid", label: "EIVA Original FFID" },
   { key: "corrected_ffid", label: "Corrected FFID" },
   { key: "reference_coord", label: "Recorder Coordinate" },
-  { key: "target_coord", label: "Target Coordinate" },
+  { key: "target_coord", label: "EIVA Coordinate" },
   { key: "distance", label: "Distance (m)" },
-  { key: "association", label: "Association" },
+  { key: "association", label: "Match" },
   { key: "qc", label: "QC" },
   { key: "basis", label: "Basis" },
   { key: "confidence", label: "Confidence" },
-  { key: "diagnostic", label: "Diagnostic" },
+  { key: "diagnostic", label: "QC note" },
   { key: "reference_line", label: "Recorder Line" },
-  { key: "target_line", label: "Target Line" },
+  { key: "target_line", label: "EIVA Line" },
 ];
 
-function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "download" | "gear" | "sliders" }) {
+function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "download" | "gear" | "sliders" | "chevron" }) {
   const paths = {
     left: <path d="m14 6-6 6 6 6M8 12h10" />,
     right: <path d="m10 6 6 6-6 6M16 12H6" />,
@@ -45,6 +45,7 @@ function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "downl
     columns: <><path d="M4 5h16v14H4z" /><path d="M10 5v14M16 5v14" /></>,
     download: <><path d="M12 4v10M8 10l4 4 4-4M5 19h14" /></>,
     gear: <><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="6.5" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" /></>,
+    chevron: <path d="m7 10 5 5 5-5" />,
     sliders: <><path d="M4 7h9M17 7h3M4 17h3M11 17h9" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></>,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="icon" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
@@ -68,7 +69,7 @@ function FormatBadge({ kind, state }: { kind: "EIVA" | "RECORDER"; state: any })
   const { profile, ready, label } = formatReadiness(state);
   const name = profile?.name || (kind === "EIVA" ? "Target format" : "Reference format");
   return <span className={`format-badge ${ready ? "format-ready" : "format-review"}`} aria-live="polite" title={`Format: ${name} (${label})`}>
-    <span aria-hidden="true">{ready ? "✓" : "!"}</span><span className="format-badge-name">{ready ? name : label}</span>
+    <span aria-hidden="true">{ready ? "✓" : "!"}</span><span className="format-badge-name">{profile ? `${name} · ${label}` : label}</span>
   </span>;
 }
 
@@ -88,12 +89,13 @@ function AnalysisSettings({ value, onChange, valid, interval }: { value: string;
     return () => cancelAnimationFrame(frame);
   }, [open]);
   return <>
-    <button ref={buttonRef} className={`settings-button${valid ? "" : " is-invalid"}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((current) => !current)} title={valid ? `Shot Interval ${interval} m` : "Shot Interval needs a finite positive value"}><Icon name="sliders" />Settings</button>
-    {open && <Popover anchorRef={buttonRef} onClose={() => setOpen(false)} className="settings-panel" role="dialog" aria-label="Analysis settings">
-      <strong>Analysis settings</strong>
-      <div className="settings-field"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={value} onChange={(event) => onChange(event.target.value)} aria-invalid={value.length > 0 && !valid} /><span className="unit">m</span></div>
-      <p className="tolerance-readout" title="The shot interval sets QC distance bands only; it never rejects a recorder record">QC normal distance ≤ <b>{valid ? `${(interval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></p>
-      <p className="settings-note">The shot interval sets QC distance bands only; it never rejects a recorder record. Re-analyse after changing it.</p>
+    <button ref={buttonRef} className={`settings-button${valid ? "" : " is-invalid"}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((current) => !current)} title={valid ? `Shot interval ${interval} m` : "Shot interval needs a finite positive value"}><Icon name="sliders" />Settings</button>
+    {open && <Popover anchorRef={buttonRef} onClose={() => setOpen(false)} className="settings-panel" role="dialog" aria-label="Settings">
+      <strong>Settings</strong>
+      <div className="settings-group">QC</div>
+      <div className="settings-field"><label htmlFor="shot-interval">Shot interval</label><input id="shot-interval" inputMode="decimal" value={value} onChange={(event) => onChange(event.target.value)} aria-invalid={value.length > 0 && !valid} /><span className="unit">m</span></div>
+      <div className="settings-field settings-readout"><span className="settings-label">Normal QC distance</span><b>{valid ? `${(interval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b><span className="settings-calculated">calculated</span></div>
+      <p className="settings-note">Normal QC distance is half the shot interval. The shot interval sets the QC distance bands; it never rejects a recorder record. Re-analyse after changing it.</p>
     </Popover>}
   </>;
 }
@@ -202,6 +204,12 @@ export default function App() {
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true);
   const [visibleColumns, setVisibleColumns] = useState<string[]>(DEFAULT_COLUMNS);
   const [columnsOpen, setColumnsOpen] = useState(false);
+  // The operator's QC column order, kept in local storage only (no engine setting, no file).
+  const [columnOrderPreference, setColumnOrderPreference] = useState<string[] | null>(() => loadColumnOrder(window.localStorage));
+  const [columnDrag, setColumnDrag] = useState<{ key: string; dropIndex: number; left: number } | null>(null);
+  const columnDragRef = useRef<{ key: string; x: number; started: boolean } | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsButtonRef = useRef<HTMLButtonElement>(null);
   const [toast, setToast] = useState("");
   const [timelineLeft, setTimelineLeft] = useState(0);
   const [timelineTooltip, setTimelineTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -251,7 +259,18 @@ export default function App() {
   const [navCurrent, setNavCurrent] = useState<Record<GroupKey, number | null>>(EMPTY_NAV);
   const jumpTargets = useMemo(() => ffidJumpTargets(records, analysis?.qc.ffid_jumps || []), [analysis, records]);
   const [jumpCurrent, setJumpCurrent] = useState<number | null>(null);
-  const allColumns = useMemo(() => [...BASE_COLUMNS, ...(analysis?.target_headers || []).map((header) => ({ key: `target_raw:${header}`, label: `Target ${header}` }))], [analysis]);
+  const allColumns = useMemo(() => [...BASE_COLUMNS, ...(analysis?.target_headers || []).map((header) => ({ key: `target_raw:${header}`, label: `EIVA ${header}` }))], [analysis]);
+  const columnOrder = useMemo(() => mergeColumnOrder(columnOrderPreference, allColumns.map((column) => column.key)), [allColumns, columnOrderPreference]);
+  const findingsByRow = useMemo(() => {
+    const rank: Record<string, number> = { SEVERE: 0, WARNING: 1, INFO: 2 };
+    const byRow = new Map<string, QcFinding[]>();
+    for (const finding of analysis?.qc.findings || []) if (finding.row_id) byRow.set(finding.row_id, [...(byRow.get(finding.row_id) || []), finding]);
+    for (const list of byRow.values()) list.sort((a, b) => rank[a.severity] - rank[b.severity]);
+    return byRow;
+  }, [analysis]);
+  const generalFindings = useMemo(() => (analysis?.qc.findings || []).filter((finding) => !finding.row_id), [analysis]);
+  const analysedInterval = analysis?.parameters.shot_interval_m;
+  const recordNote = (record: EngineRecord) => describeRecord(record, findingsByRow.get(record.id) || [], analysedInterval);
   const shotInterval = Number(shotIntervalText.trim().replace(",", "."));
   const validShotInterval = Number.isFinite(shotInterval) && shotInterval > 0;
   const analysisStale = Boolean(analysis && (!validShotInterval || analysis.parameters.shot_interval_m !== shotInterval));
@@ -422,10 +441,10 @@ export default function App() {
     if (index === null) { setTimelineTooltip(null); return; }
     const record = records[index];
     const jump = analysis?.qc.ffid_jumps.find((candidate) => candidate.row_id === record.id);
-    const jumpDetail = jump ? `\nRecorder FFID ${jump.kind === "REVERSAL" ? "decreases" : "jumps"} ${jump.from} → ${jump.to}` : "";
+    const jumpDetail = jump ? `\nRecorder FFID sequence ${jump.kind === "REVERSAL" ? "goes back" : "jumps"} from ${jump.from} to ${jump.to}` : "";
     const text = record.association === "ASSIGNED"
-      ? `Recorder ${record.reference_ffid} → Target ${record.target_ffid}\nCorrected FFID ${record.corrected_ffid}\n${getCellValue(record, "distance")} m · ${getCellValue(record, "qc")}`
-      : `${formatAssociation(record.association)}\n${record.target_ffid ? `Target ${record.target_ffid}` : `Recorder ${record.reference_ffid}`}`;
+      ? `Recorder ${record.reference_ffid} → EIVA ${record.target_ffid}\nCorrected FFID ${record.corrected_ffid}\n${getCellValue(record, "distance")} m · ${getCellValue(record, "qc")}`
+      : `${formatAssociation(record.association)}\n${record.target_ffid ? `EIVA ${record.target_ffid}` : `Recorder ${record.reference_ffid}`}`;
     setTimelineTooltip({ x: event.clientX, y: event.clientY, text: text + jumpDetail });
   };
   const handleTimelineLeave = () => setTimelineTooltip(null);
@@ -457,13 +476,77 @@ export default function App() {
     diagnosticPhase("timeline-effect-complete");
   }, [analysis, records, selectedIndex, timelineTotal, timelineTrackWidth, theme, isolation]);
 
-  const columns = useMemo(() => visibleColumns.map((key) => {
+  const columns = useMemo(() => orderedVisibleColumns(columnOrder, visibleColumns).map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
     // The eight default columns total ~1135 px so the QC column is visible in the default window without horizontal scrolling.
     const fixedWidths: Record<string, number> = { reference_ffid: 105, target_ffid: 150, corrected_ffid: 115, reference_coord: 170, target_coord: 170, distance: 100, association: 110, qc: 215 };
     const width = fixedWidths[key] ?? (key === "diagnostic" || key.startsWith("target_raw:") ? 220 : 130);
     return { id: key, header: spec.label, alignment: columnAlignment(key), width };
-  }), [allColumns, visibleColumns]);
+  }), [allColumns, columnOrder, visibleColumns]);
+  const visibleKeys = columns.map((column) => column.id);
+  const applyColumnOrder = (next: string[]) => {
+    // Keep saved positions of columns this file does not have (e.g. another EIVA file's raw fields).
+    const kept = [...next, ...(columnOrderPreference || []).filter((key) => !next.includes(key))];
+    setColumnOrderPreference(kept);
+    saveColumnOrder(window.localStorage, kept);
+  };
+  const resetColumns = () => {
+    setColumnOrderPreference(null);
+    saveColumnOrder(window.localStorage, null);
+    setVisibleColumns(DEFAULT_COLUMNS);
+  };
+  /** Drop position among the visible headers for a pointer x, and where to draw the insertion line. */
+  const columnDropAt = (clientX: number) => {
+    const viewport = tableViewportRef.current;
+    const headers = viewport ? Array.from(viewport.querySelectorAll<HTMLTableCellElement>("thead th")) : [];
+    if (!viewport || !headers.length) return null;
+    let dropIndex = headers.findIndex((header) => { const rect = header.getBoundingClientRect(); return clientX < rect.left + rect.width / 2; });
+    if (dropIndex < 0) dropIndex = headers.length;
+    const edge = dropIndex < headers.length ? headers[dropIndex].getBoundingClientRect().left : headers[headers.length - 1].getBoundingClientRect().right;
+    const box = viewport.getBoundingClientRect();
+    return { dropIndex, left: edge - box.left - viewport.clientLeft + viewport.scrollLeft };
+  };
+  const handleHeaderPointerDown = (event: PointerEvent<HTMLTableCellElement>, key: string) => {
+    if (event.button !== 0) return;
+    columnDragRef.current = { key, x: event.clientX, started: false };
+  };
+  const handleHeaderPointerMove = (event: PointerEvent<HTMLTableCellElement>) => {
+    const drag = columnDragRef.current;
+    if (!drag) return;
+    if (!drag.started) {
+      if (Math.abs(event.clientX - drag.x) < 5) return;
+      drag.started = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    const viewport = tableViewportRef.current;
+    if (viewport) {
+      // Near either edge the table scrolls so a column can be carried to any position.
+      const box = viewport.getBoundingClientRect();
+      if (event.clientX > box.right - 36) viewport.scrollLeft += 18;
+      else if (event.clientX < box.left + 36) viewport.scrollLeft -= 18;
+    }
+    const drop = columnDropAt(event.clientX);
+    if (drop) setColumnDrag({ key: drag.key, ...drop });
+  };
+  const finishColumnDrag = (event: PointerEvent<HTMLTableCellElement>, commit: boolean) => {
+    const drag = columnDragRef.current;
+    columnDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (drag?.started && commit) {
+      const drop = columnDropAt(event.clientX);
+      if (drop) applyColumnOrder(moveColumn(columnOrder, visibleKeys, drag.key, drop.dropIndex));
+    }
+    setColumnDrag(null);
+  };
+  const handleHeaderKeyDown = (event: ReactKeyboardEvent<HTMLTableCellElement>, key: string) => {
+    if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+    event.preventDefault();
+    const index = visibleKeys.indexOf(key);
+    const target = event.key === "ArrowLeft" ? index - 1 : index + 2;
+    if (target < 0 || target > visibleKeys.length) return;
+    applyColumnOrder(moveColumn(columnOrder, visibleKeys, key, target));
+    requestAnimationFrame(() => tableViewportRef.current?.querySelector<HTMLTableCellElement>(`thead th[data-column="${CSS.escape(key)}"]`)?.focus());
+  };
   const tableRecords = ["no-table", "no-visualizations", "header-only"].includes(isolation) ? [] : records;
   useLayoutEffect(() => { if (analysis) markTiming("table-render-complete"); }, [analysis, visibleColumns]);
   const visibleStart = timelineTotal ? Math.min(timelineTotal, Math.floor((timelineLeft / timelineTrackWidth) * timelineTotal) + 1) : 0;
@@ -476,6 +559,16 @@ export default function App() {
   const displacedRuns = analysis?.qc.summary.by_code.ASSOCIATION_RUN_DISPLACED ?? 0;
   const withoutRow = analysis?.correction.reference_without_target ?? 0;
   const counterTotal = (group: GroupKey) => problemGroups[group].length;
+  const counter = (label: string, group: GroupKey, title?: string) => <Counter label={label} group={group} title={title} count={summary ? counterTotal(group) : undefined} current={navCurrent[group]} ordinal={problemGroups[group].indexOf(navCurrent[group] ?? -1) + 1} total={counterTotal(group)} onNavigate={navigate} onFocus={focusIssue} />;
+  const selectedRecord = selectedIndex === null ? undefined : records[selectedIndex];
+  const selectedFindings = selectedRecord ? findingsByRow.get(selectedRecord.id) || [] : [];
+  const selectedNote = selectedRecord ? recordNote(selectedRecord) : null;
+  /** Hover text: every finding of the row in plain words, then the canonical codes for technical follow-up. */
+  const rowTitle = (record: EngineRecord) => {
+    const findings = findingsByRow.get(record.id) || [];
+    const note = recordNote(record);
+    return note ? noteTitle(note, findings, record, analysedInterval) : undefined;
+  };
 
   return <div className="app-shell" data-diagnostics-isolation={isolation}>
     <header className="app-header">
@@ -502,27 +595,46 @@ export default function App() {
 
       <section className="summary-section" aria-label="Analysis summary">
         <div className="summary-line">
-          <span className="summary-item summary-assigned">Assigned <b>{summary ? summary.assigned : "—"}</b></span>
-          <Counter label="Target-only" group="TARGET_ONLY" count={summary ? counterTotal("TARGET_ONLY") : undefined} current={navCurrent.TARGET_ONLY} ordinal={problemGroups.TARGET_ONLY.indexOf(navCurrent.TARGET_ONLY ?? -1) + 1} total={counterTotal("TARGET_ONLY")} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label="Invalid" group="INVALID" count={summary ? counterTotal("INVALID") : undefined} current={navCurrent.INVALID} ordinal={problemGroups.INVALID.indexOf(navCurrent.INVALID ?? -1) + 1} total={counterTotal("INVALID")} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label="Blocked" group="BLOCKED" count={summary ? counterTotal("BLOCKED") : undefined} current={navCurrent.BLOCKED} ordinal={problemGroups.BLOCKED.indexOf(navCurrent.BLOCKED ?? -1) + 1} total={counterTotal("BLOCKED")} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label="QC severe" group="QC_SEVERE" count={summary ? counterTotal("QC_SEVERE") : undefined} current={navCurrent.QC_SEVERE} ordinal={problemGroups.QC_SEVERE.indexOf(navCurrent.QC_SEVERE ?? -1) + 1} total={counterTotal("QC_SEVERE")} onNavigate={navigate} onFocus={focusIssue} />
-          <Counter label="QC warnings" group="QC_WARNING" count={summary ? counterTotal("QC_WARNING") : undefined} current={navCurrent.QC_WARNING} ordinal={problemGroups.QC_WARNING.indexOf(navCurrent.QC_WARNING ?? -1) + 1} total={counterTotal("QC_WARNING")} onNavigate={navigate} onFocus={focusIssue} />
-        </div>
-        <div className="summary-detail">
-          <span title="Observations for a human to inspect. They never change an association and never block the corrected copy.">QC notes: <b>{summary ? summary.qc_info.toLocaleString() : "—"}</b></span>
-          <Counter label="Recorder position jumps" group="POSITION_JUMP" count={summary ? counterTotal("POSITION_JUMP") : undefined} current={navCurrent.POSITION_JUMP} ordinal={problemGroups.POSITION_JUMP.indexOf(navCurrent.POSITION_JUMP ?? -1) + 1} total={counterTotal("POSITION_JUMP")} onNavigate={navigate} onFocus={focusIssue} />
-          <JumpNavigation jumps={analysis?.qc.ffid_jumps || []} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} />
-          {summary && summary.reference_no_shot > 0 && <span>Recorder no-shot rows: <b>{summary.reference_no_shot}</b></span>}
+          <span className="summary-item summary-matched" title="Recorder shots matched to an EIVA position">Matched <b>{summary ? summary.assigned.toLocaleString() : "—"}</b></span>
+          {counter("EIVA-only", "TARGET_ONLY", "EIVA positions with no recorder shot; they are not in the corrected EIVA file")}
+          {counter("Needs review", "NEEDS_REVIEW", "Unmatched recorder shots and rows with a warning or severe QC finding")}
+          <button ref={detailsButtonRef} className={`button secondary compact-button qc-details-button${detailsOpen ? " is-open" : ""}`} onClick={() => setDetailsOpen((open) => !open)} aria-haspopup="dialog" aria-expanded={detailsOpen} disabled={!analysis}>QC details<Icon name="chevron" /></button>
+          {analysis && detailsOpen && <Popover anchorRef={detailsButtonRef} onClose={() => setDetailsOpen(false)} className="qc-details-panel" role="dialog" aria-label="QC details">
+            <div className="qc-details-group">
+              <strong>Needs review</strong>
+              {counter("Unmatched recorder shots", "BLOCKED", "Recorder records with no EIVA position; they are not in the corrected EIVA file")}
+              {counter("Severe findings", "QC_SEVERE")}
+              {counter("Warnings", "QC_WARNING")}
+              {counter("Invalid or no-shot rows", "INVALID")}
+            </div>
+            <div className="qc-details-group">
+              <strong>Recorder log</strong>
+              {counter("Position jumps", "POSITION_JUMP")}
+              <JumpNavigation jumps={analysis.qc.ffid_jumps} current={jumpCurrent} targets={jumpTargets} onFocus={focusJump} onNavigate={navigateJump} />
+              <span className="summary-item">No-shot rows <b>{summary ? summary.reference_no_shot.toLocaleString() : "—"}</b></span>
+              <span className="summary-item" title="Observations for a human to inspect. They never change a match and never block the corrected copy.">QC notes <b>{summary ? summary.qc_info.toLocaleString() : "—"}</b></span>
+            </div>
+            <div className="qc-details-group">
+              <strong>Corrected EIVA file</strong>
+              <span className="summary-item" title="One corrected row for each recorder record that received an EIVA row">Rows <b>{analysis.validation.corrected_rows.toLocaleString()}</b> of <b>{analysis.validation.expected_rows.toLocaleString()}</b> recorder shots</span>
+              <span className="summary-item">EIVA-only rows removed <b>{analysis.correction.target_only_removed.toLocaleString()}</b></span>
+              {analysis.correction.invalid_target_removed > 0 && <span className="summary-item">Invalid EIVA rows removed <b>{analysis.correction.invalid_target_removed.toLocaleString()}</b></span>}
+              <span className="summary-item">FFIDs changed <b>{analysis.validation.ffid_changed.toLocaleString()}</b> · unchanged <b>{analysis.validation.ffid_unchanged.toLocaleString()}</b></span>
+              <span className="summary-item">Match distance median <b>{medianDistance === null ? "—" : `${medianDistance.toFixed(3)} m`}</b> · max <b>{maxDistance === null ? "—" : `${maxDistance.toFixed(3)} m`}</b></span>
+            </div>
+            {generalFindings.length > 0 && <div className="qc-details-group qc-details-notes">
+              <strong>General notes</strong>
+              {generalFindings.map((finding, index) => <QcNote key={`${finding.code}-${index}`} note={describeFinding(finding, null, analysedInterval)} code={finding.code} severity={finding.severity} />)}
+            </div>}
+          </Popover>}
         </div>
         {analysis && <div className={`correction-line ${correctionReady ? "correction-ready" : "correction-blocked"}`}>
           <strong>{correctionReady ? "Correction ready" : "Correction blocked"}</strong>
           <span>{correctionReady
-            ? `${analysis.correction.assigned.toLocaleString()} recorder records assigned · ${(analysis.correction.target_only_removed + analysis.correction.invalid_target_removed).toLocaleString()} target rows removed · corrected copy ${analysis.correction.corrected_rows.toLocaleString()} rows${withoutRow ? ` · ${withoutRow.toLocaleString()} recorder record${withoutRow === 1 ? " has" : "s have"} no EIVA row (Blocked) and ${withoutRow === 1 ? "is" : "are"} not in the copy: review QC` : ""} · QC warnings do not block output${displacedRuns ? ` · ${displacedRuns} displaced run${displacedRuns === 1 ? "" : "s"}: review QC before saving` : ""}`
+            ? <span title="QC warnings never block the corrected copy.">{`Corrected EIVA file ${analysis.correction.corrected_rows.toLocaleString()} rows · ${(analysis.correction.target_only_removed + analysis.correction.invalid_target_removed).toLocaleString()} EIVA rows left out`}{withoutRow ? ` · ${withoutRow.toLocaleString()} recorder shot${withoutRow === 1 ? " has" : "s have"} no EIVA match and ${withoutRow === 1 ? "is" : "are"} not in the file` : ""}{displacedRuns ? ` · possible one-shot offset in ${displacedRuns} place${displacedRuns === 1 ? "" : "s"}: review before saving` : ""}</span>
             : `${correctionBlockers.length.toLocaleString()} structural blocker${correctionBlockers.length === 1 ? "" : "s"}. `}<button className="inline-details" onClick={() => setCorrectionDetailsOpen(true)} disabled={correctionReady}>View details</button></span>
         </div>}
         {analysis && correctionDetailsOpen && <CorrectionDetails blockers={correctionBlockers} onClose={() => setCorrectionDetailsOpen(false)} />}
-        {analysis && <div className="correction-preview"><span>Assigned: <b>{analysis.correction.assigned.toLocaleString()}</b></span><span>Target-only removed: <b>{analysis.correction.target_only_removed.toLocaleString()}</b></span><span title="One corrected row for each recorder record that received a target row">Corrected rows: <b>{analysis.validation.corrected_rows.toLocaleString()}</b> of <b>{analysis.validation.expected_rows.toLocaleString()}</b> recorder records</span><span>FFIDs changed: <b>{analysis.validation.ffid_changed.toLocaleString()}</b> · unchanged: <b>{analysis.validation.ffid_unchanged.toLocaleString()}</b></span><span>Association distance: median <b>{medianDistance === null ? "—" : `${medianDistance.toFixed(3)} m`}</b> · max <b>{maxDistance === null ? "—" : `${maxDistance.toFixed(3)} m`}</b></span></div>}
       </section>
 
       <section className="timeline-section" aria-label="Acquisition timeline">
@@ -533,17 +645,24 @@ export default function App() {
         </div>
       </section>
 
-      <section className="table-section" aria-label="QC detail">
-        <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap"><button ref={columnsButtonRef} className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <Popover anchorRef={columnsButtonRef} onClose={() => setColumnsOpen(false)} className="columns-popover" role="dialog" aria-label="Visible columns"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div></Popover>}</div></div>
-        <div className="table-viewport" ref={tableViewportRef}>
+      <section className="table-section" aria-label="QC table">
+        <div className="section-heading table-heading">
+          <h2>QC table</h2>
+          <p className="row-note" aria-live="polite" title={selectedNote ? noteTitle(selectedNote, selectedFindings) : undefined}>{selectedRecord && selectedNote
+            ? <><span className={`row-note-mark qc-${selectedRecord.qc_severity.toLowerCase()}`} aria-hidden="true" />{selectedNote.text}{selectedNote.detail ? ` ${selectedNote.detail}` : ""}{selectedFindings.length > 1 ? <span className="row-note-more"> +{selectedFindings.length - 1} more</span> : null}</>
+            : selectedRecord ? "No QC findings for the selected row." : analysis ? "Select a row to read its QC note." : null}</p>
+          <div className="columns-wrap"><button ref={columnsButtonRef} className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <Popover anchorRef={columnsButtonRef} onClose={() => setColumnsOpen(false)} className="columns-popover" role="dialog" aria-label="Visible columns"><strong>Visible columns</strong><p className="columns-hint">Drag table headers to reorder columns.</p><div className="column-list">{columnOrder.map((key) => allColumns.find((column) => column.key === key)).filter((column) => column !== undefined).map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div><div className="columns-popover-footer"><button className="button secondary compact-button" onClick={resetColumns}>Reset columns</button></div></Popover>}</div>
+        </div>
+        <div className={`table-viewport${columnDrag ? " is-dragging-column" : ""}`} ref={tableViewportRef}>
           <table style={{ minWidth: columns.reduce((sum, column) => sum + column.width, 0) }}>
             <colgroup>{columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>
-            <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} style={{ textAlign: column.alignment }}>{column.header}</th>)}</tr></thead>
+            <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} className={columnDrag?.key === column.id ? "is-dragged" : undefined} style={{ textAlign: column.alignment }} tabIndex={0} title="Drag to reorder (Alt+← / Alt+→)" onPointerDown={(event) => handleHeaderPointerDown(event, column.id)} onPointerMove={handleHeaderPointerMove} onPointerUp={(event) => finishColumnDrag(event, true)} onPointerCancel={(event) => finishColumnDrag(event, false)} onKeyDown={(event) => handleHeaderKeyDown(event, column.id)}>{column.header}</th>)}</tr></thead>
             <tbody>{tableRecords.map((record, index) => <tr key={record.id} data-index={index} data-selected={selectedIndex === index} data-status={record.association} onClick={() => focusRecord(index)}>
-              {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "association" ? `status-cell status-${record.association.toLowerCase()}` : column.id === "qc" ? `qc-cell qc-${record.qc_severity.toLowerCase()}` : undefined} title={column.id === "qc" || column.id === "diagnostic" ? record.diagnostic : undefined}>{getCellValue(record, column.id)}</td>)}
+              {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "association" ? `status-cell status-${record.association.toLowerCase()}` : column.id === "qc" ? `qc-cell qc-${record.qc_severity.toLowerCase()}` : undefined} title={column.id === "qc" || column.id === "diagnostic" ? rowTitle(record) : undefined}>{column.id === "diagnostic" ? recordNote(record)?.text ?? "—" : getCellValue(record, column.id)}</td>)}
             </tr>)}</tbody>
           </table>
-          {!analysis && <div className="empty-table">Analyse a file pair to load QC detail.</div>}
+          {columnDrag && <div className="column-drop-indicator" style={{ left: columnDrag.left, top: tableViewportRef.current?.scrollTop ?? 0, height: tableViewportRef.current?.clientHeight ?? 0 }} aria-hidden="true" />}
+          {!analysis && <div className="empty-table">Analyse a file pair to load the QC table.</div>}
         </div>
       </section>
     </main>
@@ -552,19 +671,19 @@ export default function App() {
   </div>;
 }
 
-function Counter({ label, group, count, current, ordinal, total, onNavigate, onFocus }: { label: string; group: GroupKey; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (group: GroupKey, step: 1 | -1) => void; onFocus: (group: GroupKey) => void }) {
-  return <EventNavigation className={`summary-${group.toLowerCase()}`} label={label} value={count ?? "—"} total={total} ordinal={current === null ? 1 : ordinal} onFocus={() => onFocus(group)} onNavigate={(step) => onNavigate(group, step)} />;
+function Counter({ label, group, title, count, current, ordinal, total, onNavigate, onFocus }: { label: string; group: GroupKey; title?: string; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (group: GroupKey, step: 1 | -1) => void; onFocus: (group: GroupKey) => void }) {
+  return <EventNavigation className={`summary-${group.toLowerCase()}${count === 0 ? " summary-zero" : ""}`} title={title} label={label} value={count === undefined ? "—" : count.toLocaleString()} total={total} ordinal={current === null ? 1 : ordinal} onFocus={() => onFocus(group)} onNavigate={(step) => onNavigate(group, step)} />;
 }
 
 function JumpNavigation({ jumps, current, targets, onFocus, onNavigate }: { jumps: Array<{ from: number | null; to: number | null }>; current: number | null; targets: Array<number | null>; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
   return <span className="jump-navigation">
-    <EventNavigation label="Recorder FFID jumps" value={jumps.length} total={targets.some((target) => target !== null) ? jumps.length : 0} ordinal={(current ?? 0) + 1} onFocus={onFocus} onNavigate={onNavigate} />
+    <EventNavigation label="FFID jumps" value={jumps.length} total={targets.some((target) => target !== null) ? jumps.length : 0} ordinal={(current ?? 0) + 1} onFocus={onFocus} onNavigate={onNavigate} />
   </span>;
 }
 
-function EventNavigation({ className = "", label, value, total, ordinal, onFocus, onNavigate }: { className?: string; label: string; value: string | number; total: number; ordinal: number; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
+function EventNavigation({ className = "", title, label, value, total, ordinal, onFocus, onNavigate }: { className?: string; title?: string; label: string; value: string | number; total: number; ordinal: number; onFocus: () => void; onNavigate: (step: 1 | -1) => void }) {
   const content = <>{label} <b>{value}</b></>;
-  return <span className={`summary-item ${className} ${total ? "" : "summary-inactive"}`}>
+  return <span className={`summary-item ${className} ${total ? "" : "summary-inactive"}`} title={title}>
     {total ? <button className="summary-trigger" onClick={onFocus}>{content}</button> : content}
     {total > 1 && <span className="counter-nav">
       <button className="icon-button" onClick={() => onNavigate(-1)} title={`Previous ${label.toLowerCase().replace(/:$/, "")}`}><Icon name="left" /></button>
@@ -573,3 +692,15 @@ function EventNavigation({ className = "", label, value, total, ordinal, onFocus
     </span>}
   </span>;
 }
+
+function noteTitle(note: QcDescription, findings: QcFinding[], record?: EngineRecord, shotInterval?: number): string {
+  const lines = [findings.length ? null : [note.text, note.detail].filter(Boolean).join(" ")];
+  for (const finding of findings) { const described = describeFinding(finding, record, shotInterval); lines.push([described.text, described.detail].filter(Boolean).join(" ")); }
+  if (findings.length) lines.push(`Codes: ${findings.map((finding) => finding.code).join(", ")}`);
+  return lines.filter(Boolean).join("\n");
+}
+
+function QcNote({ note, code, severity }: { note: QcDescription; code: string; severity: string }) {
+  return <p className="qc-note" title={code}><span className={`row-note-mark qc-${severity.toLowerCase()}`} aria-hidden="true" /><span><b>{formatQcCode(code)}.</b> {note.text}{note.detail ? ` ${note.detail}` : ""}</span></p>;
+}
+

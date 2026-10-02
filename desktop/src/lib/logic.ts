@@ -7,13 +7,18 @@ export function nextCycle(indices: number[], current: number | null, step: 1 | -
   return indices[(indices.indexOf(current) + step + indices.length) % indices.length];
 }
 
-export type GroupKey = "TARGET_ONLY" | "INVALID" | "BLOCKED" | "QC_SEVERE" | "QC_WARNING" | "POSITION_JUMP";
-export const GROUP_KEYS: GroupKey[] = ["TARGET_ONLY", "INVALID", "BLOCKED", "QC_SEVERE", "QC_WARNING", "POSITION_JUMP"];
+export type GroupKey = "TARGET_ONLY" | "NEEDS_REVIEW" | "INVALID" | "BLOCKED" | "QC_SEVERE" | "QC_WARNING" | "POSITION_JUMP";
+export const GROUP_KEYS: GroupKey[] = ["TARGET_ONLY", "NEEDS_REVIEW", "INVALID", "BLOCKED", "QC_SEVERE", "QC_WARNING", "POSITION_JUMP"];
 
-/** Row indices behind each navigable counter. Association statuses and QC severities are independent axes. */
+/**
+ * Row indices behind each navigable counter. Association statuses and QC severities are independent axes.
+ * NEEDS_REVIEW is a presentation aggregate of the existing categories: unmatched recorder records plus every
+ * non-EIVA-only row with a warning or severe QC finding (EIVA-only rows have their own counter).
+ */
 export function groupIndices(records: EngineRecord[]): Record<GroupKey, number[]> {
-  const groups: Record<GroupKey, number[]> = { TARGET_ONLY: [], INVALID: [], BLOCKED: [], QC_SEVERE: [], QC_WARNING: [], POSITION_JUMP: [] };
+  const groups: Record<GroupKey, number[]> = { TARGET_ONLY: [], NEEDS_REVIEW: [], INVALID: [], BLOCKED: [], QC_SEVERE: [], QC_WARNING: [], POSITION_JUMP: [] };
   records.forEach((record, index) => {
+    if (record.association === "BLOCKED" || (record.association !== "TARGET_ONLY" && (record.qc_severity === "SEVERE" || record.qc_severity === "WARNING"))) groups.NEEDS_REVIEW.push(index);
     if (record.association === "TARGET_ONLY") groups.TARGET_ONLY.push(index);
     else if (record.association === "INVALID" || record.association === "NO_SHOT") groups.INVALID.push(index);
     else if (record.association === "BLOCKED") groups.BLOCKED.push(index);
@@ -114,4 +119,57 @@ export function summaryForDisplay(summary: AnalysisSummary) {
     qcSevere: summary.qc_severe,
     qcWarning: summary.qc_warning,
   };
+}
+
+/**
+ * Full column order: the saved order first (unknown keys dropped), then any column the saved order does not
+ * know, inserted after its predecessor in the default order so new columns keep a sensible place.
+ */
+export function mergeColumnOrder(saved: readonly string[] | null | undefined, defaults: readonly string[]): string[] {
+  const known = new Set(defaults);
+  const order = (saved || []).filter((key, index, all) => known.has(key) && all.indexOf(key) === index);
+  defaults.forEach((key, index) => {
+    if (order.includes(key)) return;
+    const previous = index > 0 ? order.indexOf(defaults[index - 1]) : -1;
+    order.splice(previous + 1, 0, key);
+  });
+  return order;
+}
+
+/** The visible columns in display order. */
+export function orderedVisibleColumns(order: readonly string[], visible: readonly string[]): string[] {
+  const shown = new Set(visible);
+  return [...order.filter((key) => shown.has(key)), ...visible.filter((key) => !order.includes(key))];
+}
+
+/**
+ * Move a visible column so it lands at `dropIndex` among the visible columns (0 = first, length = last),
+ * keeping hidden columns where they were.
+ */
+export function moveColumn(order: readonly string[], visible: readonly string[], key: string, dropIndex: number): string[] {
+  const shown = orderedVisibleColumns(order, visible);
+  const from = shown.indexOf(key);
+  if (from < 0) return [...order];
+  const rest = shown.filter((column) => column !== key);
+  const at = Math.max(0, Math.min(rest.length, dropIndex > from ? dropIndex - 1 : dropIndex));
+  const full = [...order, ...shown.filter((column) => !order.includes(column))].filter((column) => column !== key);
+  const before = rest[at];
+  full.splice(before === undefined ? full.indexOf(rest[rest.length - 1]) + 1 : full.indexOf(before), 0, key);
+  return full;
+}
+
+export const COLUMN_ORDER_STORAGE_KEY = "shotlogfixer-qc-column-order";
+
+export function loadColumnOrder(storage: Pick<Storage, "getItem"> | undefined): string[] | null {
+  try {
+    const parsed: unknown = JSON.parse(storage?.getItem(COLUMN_ORDER_STORAGE_KEY) || "null");
+    return Array.isArray(parsed) && parsed.every((key) => typeof key === "string") ? parsed : null;
+  } catch { return null; }
+}
+
+export function saveColumnOrder(storage: Pick<Storage, "setItem" | "removeItem"> | undefined, order: readonly string[] | null) {
+  try {
+    if (order) storage?.setItem(COLUMN_ORDER_STORAGE_KEY, JSON.stringify(order));
+    else storage?.removeItem(COLUMN_ORDER_STORAGE_KEY);
+  } catch { /* Storage can be unavailable; the order then lasts for this session only. */ }
 }
