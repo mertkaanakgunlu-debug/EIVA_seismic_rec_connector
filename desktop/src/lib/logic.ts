@@ -173,3 +173,20 @@ export function saveColumnOrder(storage: Pick<Storage, "setItem" | "removeItem">
     else storage?.removeItem(COLUMN_ORDER_STORAGE_KEY);
   } catch { /* Storage can be unavailable; the order then lasts for this session only. */ }
 }
+
+/**
+ * Rows of a windowed table to mount for a scroll position: the rows intersecting the viewport plus `overscan`
+ * rows on each side. `offset` is the scroll distance from the first body row; `end` is exclusive.
+ */
+export function tableRowWindow(offset: number, viewportHeight: number, rowHeight: number, total: number, overscan: number): { start: number; end: number } {
+  if (total <= 0 || rowHeight <= 0) return { start: 0, end: 0 };
+  const first = Math.floor(Math.max(0, offset) / rowHeight);
+  const last = Math.ceil((Math.max(0, offset) + Math.max(0, viewportHeight)) / rowHeight);
+  return { start: Math.max(0, Math.min(total - 1, first) - overscan), end: Math.min(total, Math.max(first + 1, last) + overscan) };
+}
+
+/** Drop position among headers whose horizontal midpoints are `midpoints`: the first header the pointer is left of. */
+export function columnDropIndex(x: number, midpoints: readonly number[]): number {
+  const index = midpoints.findIndex((mid) => x < mid);
+  return index < 0 ? midpoints.length : index;
+}

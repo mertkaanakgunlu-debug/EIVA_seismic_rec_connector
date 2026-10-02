@@ -222,6 +222,11 @@ td { padding: 7px 10px; overflow: hidden; text-overflow: ellipsis; color: var(--
 tbody tr { cursor: pointer; }
 tbody tr:hover td { background: color-mix(in srgb, var(--surface-raised) 72%, transparent); }
 tbody tr[data-selected="true"] td { background: var(--selected); }
+/* Windowed QC table: every result row has one fixed height (DEFAULT_ROW_HEIGHT in App.tsx), so no value, e.g. one in a fallback font, can shift row positions. */
+tbody tr[data-index] td { box-sizing: border-box; height: 29px; line-height: 14px; }
+/* Windowed QC table: spacer rows stand in for the rows that are not mounted. */
+tbody tr.table-spacer { cursor: default; }
+tbody tr.table-spacer td, tbody tr.table-spacer:hover td { padding: 0; background: transparent; border: 0; }
 .status-cell.status-assigned { color: var(--matched); }
 td[data-column="diagnostic"] { color: var(--muted); }
 .status-cell.status-target_only { color: var(--target-only); }
