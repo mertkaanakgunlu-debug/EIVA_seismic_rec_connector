@@ -24,6 +24,9 @@ _Last updated: 2026-10-02 (bootstrap)_
 ## Active task
 - [TASK-UI-001](tasks/TASK-UI-001-window-and-overlay-polish.md) — window and overlay polish (desktop UI only).
   In progress in its own thread. Independent of TASK-001–004 and may run alongside them.
+- [TASK-UI-002](tasks/TASK-UI-002-compact-controls-and-qc-usability.md) — compact controls and QC usability (desktop UI
+  only). Depends on TASK-UI-001; in progress in its own thread on a branch stacked on TASK-UI-001. The CTO's final
+  substantial UI polish task. Nothing merges until the CTO has reviewed it.
 
 ## Queued tasks (in order)
 1. [TASK-001](tasks/TASK-001-golden-regression-dataset.md) — compact golden regression dataset (tests only).
