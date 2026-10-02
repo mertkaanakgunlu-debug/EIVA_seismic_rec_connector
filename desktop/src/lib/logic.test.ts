@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { COLUMN_ORDER_STORAGE_KEY, columnAlignment, ffidJumpTargets, getCellValue, groupIndices, loadColumnOrder, mergeColumnOrder, moveColumn, nextCycle, orderedVisibleColumns, PLACEHOLDER, saveColumnOrder, recordTone, resolveThemePreference, summaryForDisplay, timelineLogicalX, timelinePositionForRecord, timelineRecordIndexAtX } from "./logic";
+import { COLUMN_ORDER_STORAGE_KEY, columnAlignment, columnDropIndex, ffidJumpTargets, getCellValue, groupIndices, loadColumnOrder, mergeColumnOrder, moveColumn, nextCycle, orderedVisibleColumns, PLACEHOLDER, saveColumnOrder, recordTone, resolveThemePreference, summaryForDisplay, tableRowWindow, timelineLogicalX, timelinePositionForRecord, timelineRecordIndexAtX } from "./logic";
 import { describeFinding, describeRecord, formatAssociation, formatQc, formatQcCode, formatSeverity } from "./presentation";
 import type { EngineRecord } from "./types";
 
@@ -174,5 +174,23 @@ describe("QC column order", () => {
     expect(loadColumnOrder(storage)).toBeNull();
     expect(loadColumnOrder(undefined)).toBeNull();
     expect(() => saveColumnOrder({ setItem: () => { throw new Error("full"); }, removeItem: () => undefined }, ["a"])).not.toThrow();
+  });
+});
+
+describe("QC table windowing", () => {
+  it("mounts the visible rows plus overscan, clamped to the table", () => {
+    expect(tableRowWindow(0, 300, 30, 6772, 8)).toEqual({ start: 0, end: 18 });
+    expect(tableRowWindow(3000, 300, 30, 6772, 8)).toEqual({ start: 92, end: 118 });
+    expect(tableRowWindow(6772 * 30, 300, 30, 6772, 8)).toEqual({ start: 6763, end: 6772 });
+    expect(tableRowWindow(-40, 300, 30, 5, 8)).toEqual({ start: 0, end: 5 });
+    expect(tableRowWindow(0, 300, 30, 0, 8)).toEqual({ start: 0, end: 0 });
+  });
+
+  it("drops a dragged column before the first header whose midpoint lies right of the pointer", () => {
+    const mids = [50, 150, 260];
+    expect(columnDropIndex(10, mids)).toBe(0);
+    expect(columnDropIndex(149, mids)).toBe(1);
+    expect(columnDropIndex(150, mids)).toBe(2);
+    expect(columnDropIndex(400, mids)).toBe(3);
   });
 });

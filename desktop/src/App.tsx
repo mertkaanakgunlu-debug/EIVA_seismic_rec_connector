@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent } from "react";
-import { basename, columnAlignment, ffidJumpTargets, getCellValue, GROUP_KEYS, groupIndices, loadColumnOrder, mergeColumnOrder, moveColumn, nextCycle, orderedVisibleColumns, recordTone, resolveThemePreference, saveColumnOrder, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX, type GroupKey } from "./lib/logic";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent, type RefObject } from "react";
+import { flushSync } from "react-dom";
+import { basename, columnAlignment, columnDropIndex, ffidJumpTargets, getCellValue, GROUP_KEYS, groupIndices, loadColumnOrder, mergeColumnOrder, moveColumn, nextCycle, orderedVisibleColumns, recordTone, resolveThemePreference, saveColumnOrder, tableRowWindow, timelineLogicalX, timelineMarkerX, timelineRecordIndexAtX, type GroupKey } from "./lib/logic";
 import type { AnalysisResponse, AnalysisSuccess, CorrectionBlocker, EngineRecord, ExportResponse, FormatProfileSummary, QcFinding } from "./lib/types";
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
@@ -201,8 +202,10 @@ export default function App() {
   const [columnsOpen, setColumnsOpen] = useState(false);
   // The operator's QC column order, kept in local storage only (no engine setting, no file).
   const [columnOrderPreference, setColumnOrderPreference] = useState<string[] | null>(() => loadColumnOrder(window.localStorage));
-  const [columnDrag, setColumnDrag] = useState<{ key: string; dropIndex: number; left: number } | null>(null);
-  const columnDragRef = useRef<{ key: string; x: number; started: boolean } | null>(null);
+  // Only the dragged column's key is React state; the pointer position and drop line live in a ref and are painted once per frame.
+  const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
+  const columnDragRef = useRef<ColumnDrag | null>(null);
+  const dropIndicatorRef = useRef<HTMLDivElement | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsButtonRef = useRef<HTMLButtonElement>(null);
   const [toast, setToast] = useState("");
@@ -211,6 +214,7 @@ export default function App() {
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelineCanvasRef = useRef<HTMLCanvasElement>(null);
   const tableViewportRef = useRef<HTMLDivElement>(null);
+  const rowHeightRef = useRef(DEFAULT_ROW_HEIGHT);
   const columnsButtonRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef({ active: false, moved: false, x: 0, scrollLeft: 0 });
 
@@ -265,7 +269,20 @@ export default function App() {
   }, [analysis]);
   const generalFindings = useMemo(() => (analysis?.qc.findings || []).filter((finding) => !finding.row_id), [analysis]);
   const analysedInterval = analysis?.parameters.shot_interval_m;
-  const recordNote = (record: EngineRecord) => describeRecord(record, findingsByRow.get(record.id) || [], analysedInterval);
+  // QC sentences are built once per row and analysis, and only for rows that are actually shown.
+  const rowNotes = useMemo(() => {
+    const cache = new Map<string, RowNote>();
+    return (record: EngineRecord): RowNote => {
+      let cached = cache.get(record.id);
+      if (!cached) {
+        const findings = findingsByRow.get(record.id) || [];
+        const note = describeRecord(record, findings, analysedInterval);
+        cached = { note, title: note ? noteTitle(note, findings, record, analysedInterval) : undefined };
+        cache.set(record.id, cached);
+      }
+      return cached;
+    };
+  }, [findingsByRow, analysedInterval]);
   const shotInterval = Number(shotIntervalText.trim().replace(",", "."));
   const validShotInterval = Number.isFinite(shotInterval) && shotInterval > 0;
   const analysisStale = Boolean(analysis && (!validShotInterval || analysis.parameters.shot_interval_m !== shotInterval));
@@ -296,10 +313,11 @@ export default function App() {
     const jump = jumpTargets.indexOf(index);
     if (jump >= 0) setJumpCurrent(jump);
     const viewport = tableViewportRef.current;
-    const row = viewport?.querySelector<HTMLTableRowElement>(`tr[data-index="${index}"]`);
-    if (viewport && row) {
-      const rowTop = viewport.scrollTop + row.getBoundingClientRect().top - viewport.getBoundingClientRect().top - viewport.clientTop;
-      viewport.scrollTo({ top: Math.max(0, rowTop - (viewport.clientHeight - row.clientHeight) / 2), behavior: "auto" });
+    if (viewport) {
+      // The row may not be mounted (windowed table): its position follows from the fixed row height.
+      const rowHeight = rowHeightRef.current;
+      const rowTop = (viewport.querySelector("thead")?.offsetHeight ?? 0) + index * rowHeight;
+      viewport.scrollTo({ top: Math.max(0, rowTop - (viewport.clientHeight - rowHeight) / 2), behavior: "auto" });
     }
     const timeline = timelineRef.current;
     if (timeline) {
@@ -490,20 +508,37 @@ export default function App() {
     saveColumnOrder(window.localStorage, null);
     setVisibleColumns(DEFAULT_COLUMNS);
   };
-  /** Drop position among the visible headers for a pointer x, and where to draw the insertion line. */
-  const columnDropAt = (clientX: number) => {
+  /** Drop position for a pointer x, from the header geometry cached at drag start (no layout reads per event). */
+  const columnDropAt = (drag: ColumnDrag, clientX: number, scrollLeft: number) => {
+    const geometry = drag.geometry!;
+    const dropIndex = columnDropIndex(clientX - geometry.viewportLeft + scrollLeft, geometry.midpoints);
+    return { dropIndex, left: geometry.edges[dropIndex] };
+  };
+  /** Paint the insertion line from the drag ref; also called when the line mounts. */
+  const placeDropIndicator = useCallback((indicator: HTMLDivElement | null) => {
+    dropIndicatorRef.current = indicator;
+    const drag = columnDragRef.current;
+    if (!indicator || !drag?.geometry || drag.left === null) return;
+    indicator.style.left = `${drag.left}px`;
+    indicator.style.top = `${drag.top}px`;
+    indicator.style.height = `${drag.geometry.viewportHeight}px`;
+  }, []);
+  /** One visual update per frame: edge auto-scroll, then the drop line for the latest pointer position. */
+  const paintColumnDrag = () => {
+    const drag = columnDragRef.current;
     const viewport = tableViewportRef.current;
-    const headers = viewport ? Array.from(viewport.querySelectorAll<HTMLTableCellElement>("thead th")) : [];
-    if (!viewport || !headers.length) return null;
-    let dropIndex = headers.findIndex((header) => { const rect = header.getBoundingClientRect(); return clientX < rect.left + rect.width / 2; });
-    if (dropIndex < 0) dropIndex = headers.length;
-    const edge = dropIndex < headers.length ? headers[dropIndex].getBoundingClientRect().left : headers[headers.length - 1].getBoundingClientRect().right;
-    const box = viewport.getBoundingClientRect();
-    return { dropIndex, left: edge - box.left - viewport.clientLeft + viewport.scrollLeft };
+    if (!drag?.geometry || !viewport) return;
+    drag.frame = 0;
+    // Near either edge the table scrolls so a column can be carried to any position.
+    if (drag.clientX > drag.geometry.viewportRight - 36) viewport.scrollLeft += 18;
+    else if (drag.clientX < drag.geometry.viewportLeft + 36) viewport.scrollLeft -= 18;
+    drag.left = columnDropAt(drag, drag.clientX, viewport.scrollLeft).left;
+    drag.top = viewport.scrollTop;
+    placeDropIndicator(dropIndicatorRef.current);
   };
   const handleHeaderPointerDown = (event: PointerEvent<HTMLTableCellElement>, key: string) => {
     if (event.button !== 0) return;
-    columnDragRef.current = { key, x: event.clientX, started: false };
+    columnDragRef.current = { key, x: event.clientX, clientX: event.clientX, started: false, geometry: null, frame: 0, left: null, top: 0 };
     // Capture at once so the release always reaches this header, wherever the pointer ends up.
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -512,27 +547,39 @@ export default function App() {
     if (!drag) return;
     if (!drag.started) {
       if (Math.abs(event.clientX - drag.x) < 5) return;
+      const viewport = tableViewportRef.current;
+      if (!viewport) return;
       drag.started = true;
-    }
-    const viewport = tableViewportRef.current;
-    if (viewport) {
-      // Near either edge the table scrolls so a column can be carried to any position.
+      // Header geometry is read once, in table content coordinates, so horizontal scrolling during the drag needs no re-read.
       const box = viewport.getBoundingClientRect();
-      if (event.clientX > box.right - 36) viewport.scrollLeft += 18;
-      else if (event.clientX < box.left + 36) viewport.scrollLeft -= 18;
+      const viewportLeft = box.left + viewport.clientLeft;
+      const rects = Array.from(viewport.querySelectorAll<HTMLTableCellElement>("thead th"), (header) => header.getBoundingClientRect());
+      if (!rects.length) { drag.started = false; return; }
+      const toContent = (x: number) => x - viewportLeft + viewport.scrollLeft;
+      drag.geometry = {
+        viewportLeft, viewportRight: box.right, viewportHeight: viewport.clientHeight,
+        midpoints: rects.map((rect) => toContent(rect.left + rect.width / 2)),
+        edges: [...rects.map((rect) => toContent(rect.left)), toContent(rects[rects.length - 1].right)],
+      };
+      setDraggedColumn(drag.key);
     }
-    const drop = columnDropAt(event.clientX);
-    if (drop) setColumnDrag({ key: drag.key, ...drop });
+    drag.clientX = event.clientX;
+    if (!drag.frame) drag.frame = requestAnimationFrame(paintColumnDrag);
+  };
+  const endColumnDrag = () => {
+    const drag = columnDragRef.current;
+    if (drag?.frame) cancelAnimationFrame(drag.frame);
+    columnDragRef.current = null;
+    setDraggedColumn(null);
   };
   const finishColumnDrag = (event: PointerEvent<HTMLTableCellElement>, commit: boolean) => {
     const drag = columnDragRef.current;
-    columnDragRef.current = null;
+    const viewport = tableViewportRef.current;
+    endColumnDrag();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    if (drag?.started && commit) {
-      const drop = columnDropAt(event.clientX);
-      if (drop) applyColumnOrder(moveColumn(columnOrder, visibleKeys, drag.key, drop.dropIndex));
+    if (drag?.started && drag.geometry && commit && viewport) {
+      applyColumnOrder(moveColumn(columnOrder, visibleKeys, drag.key, columnDropAt(drag, event.clientX, viewport.scrollLeft).dropIndex));
     }
-    setColumnDrag(null);
   };
   const handleHeaderKeyDown = (event: ReactKeyboardEvent<HTMLTableCellElement>, key: string) => {
     if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
@@ -558,13 +605,8 @@ export default function App() {
   const counter = (label: string, group: GroupKey, title?: string) => <Counter label={label} group={group} title={title} count={summary ? counterTotal(group) : undefined} current={navCurrent[group]} ordinal={problemGroups[group].indexOf(navCurrent[group] ?? -1) + 1} total={counterTotal(group)} onNavigate={navigate} onFocus={focusIssue} />;
   const selectedRecord = selectedIndex === null ? undefined : records[selectedIndex];
   const selectedFindings = selectedRecord ? findingsByRow.get(selectedRecord.id) || [] : [];
-  const selectedNote = selectedRecord ? recordNote(selectedRecord) : null;
-  /** Hover text: every finding of the row in plain words, then the canonical codes for technical follow-up. */
-  const rowTitle = (record: EngineRecord) => {
-    const findings = findingsByRow.get(record.id) || [];
-    const note = recordNote(record);
-    return note ? noteTitle(note, findings, record, analysedInterval) : undefined;
-  };
+  const selectedRowNote = selectedRecord ? rowNotes(selectedRecord) : null;
+  const selectedNote = selectedRowNote?.note ?? null;
 
   return <div className="app-shell" data-diagnostics-isolation={isolation}>
     <header className="app-header">
@@ -644,20 +686,18 @@ export default function App() {
       <section className="table-section" aria-label="QC table">
         <div className="section-heading table-heading">
           <h2>QC table</h2>
-          <p className="row-note" aria-live="polite" title={selectedRecord && selectedNote ? noteTitle(selectedNote, selectedFindings, selectedRecord, analysedInterval) : undefined}>{selectedRecord && selectedNote
+          <p className="row-note" aria-live="polite" title={selectedRowNote?.title}>{selectedRecord && selectedNote
             ? <><span className={`row-note-mark qc-${selectedRecord.qc_severity.toLowerCase()}`} aria-hidden="true" />{selectedNote.text}{selectedNote.detail ? ` ${selectedNote.detail}` : ""}{selectedFindings.length > 1 ? <span className="row-note-more"> +{selectedFindings.length - 1} more</span> : null}</>
             : selectedRecord ? "No QC findings for the selected row." : analysis ? "Select a row to read its QC note." : null}</p>
           <div className="columns-wrap"><button ref={columnsButtonRef} className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <Popover anchorRef={columnsButtonRef} onClose={() => setColumnsOpen(false)} className="columns-popover" role="dialog" aria-label="Visible columns"><strong>Visible columns</strong><p className="columns-hint">Drag table headers to reorder columns.</p><div className="column-list">{columnOrder.map((key) => allColumns.find((column) => column.key === key)).filter((column) => column !== undefined).map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div><div className="columns-popover-footer"><button className="button secondary compact-button" onClick={resetColumns}>Reset columns</button></div></Popover>}</div>
         </div>
-        <div className={`table-viewport${columnDrag ? " is-dragging-column" : ""}`} ref={tableViewportRef}>
+        <div className={`table-viewport${draggedColumn ? " is-dragging-column" : ""}`} ref={tableViewportRef}>
           <table style={{ minWidth: columns.reduce((sum, column) => sum + column.width, 0) }}>
             <colgroup>{columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>
-            <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} className={columnDrag?.key === column.id ? "is-dragged" : undefined} style={{ textAlign: column.alignment }} tabIndex={0} title="Drag to reorder (Alt+← / Alt+→)" onPointerDown={(event) => handleHeaderPointerDown(event, column.id)} onPointerMove={handleHeaderPointerMove} onPointerUp={(event) => finishColumnDrag(event, true)} onPointerCancel={(event) => finishColumnDrag(event, false)} onLostPointerCapture={() => { columnDragRef.current = null; setColumnDrag(null); }} onKeyDown={(event) => handleHeaderKeyDown(event, column.id)}>{column.header}</th>)}</tr></thead>
-            <tbody>{tableRecords.map((record, index) => <tr key={record.id} data-index={index} data-selected={selectedIndex === index} data-status={record.association} onClick={() => focusRecord(index)}>
-              {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "association" ? `status-cell status-${record.association.toLowerCase()}` : column.id === "qc" ? `qc-cell qc-${record.qc_severity.toLowerCase()}` : undefined} title={column.id === "qc" || column.id === "diagnostic" ? rowTitle(record) : undefined}>{column.id === "diagnostic" ? recordNote(record)?.text ?? "—" : getCellValue(record, column.id)}</td>)}
-            </tr>)}</tbody>
+            <thead><tr>{columns.map((column) => <th key={column.id} data-column={column.id} className={draggedColumn === column.id ? "is-dragged" : undefined} style={{ textAlign: column.alignment }} tabIndex={0} title="Drag to reorder (Alt+← / Alt+→)" onPointerDown={(event) => handleHeaderPointerDown(event, column.id)} onPointerMove={handleHeaderPointerMove} onPointerUp={(event) => finishColumnDrag(event, true)} onPointerCancel={(event) => finishColumnDrag(event, false)} onLostPointerCapture={endColumnDrag} onKeyDown={(event) => handleHeaderKeyDown(event, column.id)}>{column.header}</th>)}</tr></thead>
+            <WindowedRows viewportRef={tableViewportRef} rowHeightRef={rowHeightRef} records={tableRecords} columns={columns} selectedIndex={selectedIndex} rowNotes={rowNotes} onSelect={focusRecord} />
           </table>
-          {columnDrag && <div className="column-drop-indicator" style={{ left: columnDrag.left, top: tableViewportRef.current?.scrollTop ?? 0, height: tableViewportRef.current?.clientHeight ?? 0 }} aria-hidden="true" />}
+          {draggedColumn && <div className="column-drop-indicator" ref={placeDropIndicator} aria-hidden="true" />}
           {!analysis && <div className="empty-table">Analyse a file pair to load the QC table.</div>}
         </div>
       </section>
@@ -666,6 +706,75 @@ export default function App() {
     {toast && <div className="toast" role="status">{toast}</div>}
   </div>;
 }
+
+type TableColumn = { id: string; header: string; alignment: "center" | "left"; width: number };
+type RowNote = { note: QcDescription | null; title?: string };
+type ColumnDrag = {
+  key: string; x: number; clientX: number; started: boolean; frame: number; left: number | null; top: number;
+  geometry: { viewportLeft: number; viewportRight: number; viewportHeight: number; midpoints: number[]; edges: number[] } | null;
+};
+
+/** Rendered before the first row is measured; the real height replaces it once a row is mounted. */
+const DEFAULT_ROW_HEIGHT = 30;
+const ROW_OVERSCAN = 8;
+
+/**
+ * The QC table body, windowed: only the rows in view plus a small overscan are mounted, between two spacer rows that
+ * keep the full scroll height. Rows share one height, so any row's position follows from its index.
+ */
+function WindowedRows({ viewportRef, rowHeightRef, records, columns, selectedIndex, rowNotes, onSelect }: { viewportRef: RefObject<HTMLDivElement | null>; rowHeightRef: { current: number }; records: EngineRecord[]; columns: TableColumn[]; selectedIndex: number | null; rowNotes: (record: EngineRecord) => RowNote; onSelect: (index: number) => void }) {
+  useRenderDiagnostics("WindowedRows");
+  const [rowHeight, setRowHeight] = useState(rowHeightRef.current);
+  const [range, setRange] = useState({ start: 0, end: 0 });
+  const bodyRef = useRef<HTMLTableSectionElement>(null);
+  const update = useCallback((sync: boolean) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const offset = viewport.scrollTop - (viewport.querySelector("thead")?.offsetHeight ?? 0);
+    const next = tableRowWindow(offset, viewport.clientHeight, rowHeightRef.current, records.length, ROW_OVERSCAN);
+    const apply = () => setRange((current) => current.start === next.start && current.end === next.end ? current : next);
+    // Rendering inside the scroll event keeps the new rows in the same frame as the scroll (no blank flash).
+    if (sync) flushSync(apply); else apply();
+  }, [viewportRef, rowHeightRef, records.length]);
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    update(false);
+    const onScroll = () => update(true);
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    const resize = new ResizeObserver(() => update(false));
+    resize.observe(viewport);
+    return () => { viewport.removeEventListener("scroll", onScroll); resize.disconnect(); };
+  }, [viewportRef, update, rowHeight]);
+  // Measure the real row height once per data or column change, not on every scroll render.
+  useLayoutEffect(() => {
+    const measured = bodyRef.current?.querySelector<HTMLTableRowElement>("tr[data-index]")?.getBoundingClientRect().height;
+    if (measured && Math.abs(measured - rowHeightRef.current) > 0.01) { rowHeightRef.current = measured; setRowHeight(measured); }
+  }, [records, columns, range.end > range.start, rowHeightRef]);
+  const end = Math.min(range.end, records.length);
+  const start = Math.min(range.start, end);
+  const onClick = (event: MouseEvent<HTMLTableSectionElement>) => {
+    const row = (event.target as HTMLElement).closest<HTMLTableRowElement>("tr[data-index]");
+    if (row) onSelect(Number(row.dataset.index));
+  };
+  const rows = [];
+  for (let index = start; index < end; index++) {
+    const record = records[index];
+    rows.push(<QcRow key={record.id} record={record} index={index} selected={selectedIndex === index} columns={columns} note={rowNotes(record)} />);
+  }
+  return <tbody ref={bodyRef} onClick={onClick}>
+    {start > 0 && <tr className="table-spacer" aria-hidden="true"><td colSpan={columns.length} style={{ height: start * rowHeight }} /></tr>}
+    {rows}
+    {end < records.length && <tr className="table-spacer" aria-hidden="true"><td colSpan={columns.length} style={{ height: (records.length - end) * rowHeight }} /></tr>}
+  </tbody>;
+}
+
+/** One result row. Memoised: scrolling, selection elsewhere and column dragging leave it untouched. */
+const QcRow = memo(function QcRow({ record, index, selected, columns, note }: { record: EngineRecord; index: number; selected: boolean; columns: TableColumn[]; note: RowNote }) {
+  return <tr data-index={index} data-selected={selected} data-status={record.association}>
+    {columns.map((column) => <td key={column.id} data-column={column.id} style={{ textAlign: column.alignment }} className={column.id === "association" ? `status-cell status-${record.association.toLowerCase()}` : column.id === "qc" ? `qc-cell qc-${record.qc_severity.toLowerCase()}` : undefined} title={column.id === "qc" || column.id === "diagnostic" ? note.title : undefined}>{column.id === "diagnostic" ? note.note?.text ?? "—" : getCellValue(record, column.id)}</td>)}
+  </tr>;
+});
 
 function Counter({ label, group, title, count, current, ordinal, total, onNavigate, onFocus }: { label: string; group: GroupKey; title?: string; count?: number; current: number | null; ordinal: number; total: number; onNavigate: (group: GroupKey, step: 1 | -1) => void; onFocus: (group: GroupKey) => void }) {
   return <EventNavigation className={`summary-${group.toLowerCase()}${count === 0 ? " summary-zero" : ""}`} title={title} label={label} value={count === undefined ? "—" : count.toLocaleString()} total={total} ordinal={current === null ? 1 : ordinal} onFocus={() => onFocus(group)} onNavigate={(step) => onNavigate(group, step)} />;
