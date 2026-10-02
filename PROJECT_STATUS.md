@@ -6,7 +6,7 @@ _Last updated: 2026-10-02 (bootstrap)_
 - Commit `7ef755d3adb1b6010233d61619f5342d7917ec9b` on branch `phase5-recorder-authoritative-alignment`
   (ShotLogFixer 0.5.0). History is linear from `e071a04`; every older `phase*`, `runtime-*` and `ui-*` branch is an
   ancestor of this commit.
-- Last accepted commit: `b63db9e` (TASK-UI-001, not yet merged into the baseline).
+- Last accepted commit: `a74dd3c` (TASK-UI-002, stacked on TASK-UI-001 `b63db9e`; neither merged into the baseline).
 
 ## Completed capabilities (at baseline)
 - Generic, profile-driven parsing of recorder and EIVA text files with deterministic format detection and local user
@@ -22,14 +22,17 @@ _Last updated: 2026-10-02 (bootstrap)_
   bootstrap); QC shows it only indirectly (TASK-002).
 
 ## Accepted, awaiting CTO review before merge
+Merge order: PR #2, then PR #3. UI feature development is stopped after TASK-UI-002, per that task.
 - [TASK-UI-001](tasks/TASK-UI-001-window-and-overlay-polish.md) — window and overlay polish. Accepted at `b63db9e` on
   `claude/task-ui-001-window-overlay-polish-7kg905` (draft PR #2 into the baseline branch). Verified: diff confined to
   `desktop/`, typecheck clean, desktop tests 11/11, build OK, Electron checked at 1440×900 and 1366×768.
+- [TASK-UI-002](tasks/TASK-UI-002-compact-controls-and-qc-usability.md) — compact controls and QC usability. Accepted at
+  `a74dd3c` on `claude/task-ui-002-compact-controls-qc-fltloo` (draft PR #3, stacked on PR #2). Verified: diff confined
+  to `desktop/src`, no dependency change, engine calls and readiness unchanged, typecheck clean, desktop tests 20/20,
+  build OK, Electron checked at 1440×900 and 1366×768.
 
 ## Active task
-- [TASK-UI-002](tasks/TASK-UI-002-compact-controls-and-qc-usability.md) — compact controls and QC usability (desktop UI
-  only). Stacked on the TASK-UI-001 branch. The CTO's final substantial UI polish task; nothing merges until the CTO
-  has reviewed it. Independent of TASK-001–004.
+None. Next: TASK-001.
 
 ## Queued tasks (in order)
 1. [TASK-001](tasks/TASK-001-golden-regression-dataset.md) — compact golden regression dataset (tests only).
@@ -46,6 +49,8 @@ Strictly sequential: 002 and 003 both edit `qc.py` and the golden expectations, 
 - Verbatim Project Goal / Instructions text awaiting CTO confirmation before it is committed.
 - **Default branch is stale**: GitHub's default branch is `phase1-detection-qc` (`645a049`, 15 commits behind the
   baseline). Needs a CTO decision before TASK-003: fast-forward a `main` branch to the baseline and make it the default.
+- "Save Corrected Set" is not a product capability (the recorder is never rewritten); whether it should exist is
+  pending the CTO's decision. Not a task.
 - 13 superseded remote branches remain (all ancestors of the baseline); safe to delete once the default branch is fixed.
 
 ## Test / build status (at baseline, Linux cloud container)
@@ -53,7 +58,7 @@ Strictly sequential: 002 and 003 both edit `qc.py` and the golden expectations, 
 |---|---|---|---|
 | Python | `python -m pytest` | 150 passed, 7 skipped (real OS_A-2 sample absent) | ~2 s |
 | Python, parallel | `python -m pytest -n auto` | same | ~2 s (no gain) |
-| Desktop unit | `npm run test` (in `desktop/`) | 11 passed | ~1 s |
+| Desktop unit | `npm run test` (in `desktop/`) | 11 passed (20 on the TASK-UI-002 branch) | ~1 s |
 | Desktop types | `npm run typecheck` | clean | ~4 s |
 | Electron smoke / portable build | Windows only | not run | — |
 
