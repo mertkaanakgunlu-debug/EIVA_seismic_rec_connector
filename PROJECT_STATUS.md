@@ -6,7 +6,7 @@ _Last updated: 2026-10-02 (bootstrap)_
 - Commit `7ef755d3adb1b6010233d61619f5342d7917ec9b` on branch `phase5-recorder-authoritative-alignment`
   (ShotLogFixer 0.5.0). History is linear from `e071a04`; every older `phase*`, `runtime-*` and `ui-*` branch is an
   ancestor of this commit.
-- Last accepted commit: `a74dd3c` (TASK-UI-002, stacked on TASK-UI-001 `b63db9e`; neither merged into the baseline).
+- Last accepted commit: `ab86620` (TASK-UI-PERF, stacked on TASK-UI-002 and TASK-UI-001; none merged into the baseline).
 
 ## Completed capabilities (at baseline)
 - Generic, profile-driven parsing of recorder and EIVA text files with deterministic format detection and local user
@@ -22,7 +22,7 @@ _Last updated: 2026-10-02 (bootstrap)_
   bootstrap); QC shows it only indirectly (TASK-002).
 
 ## Accepted, awaiting CTO review before merge
-Merge order: PR #2, then PR #3. UI feature development is stopped after TASK-UI-002, per that task.
+Merge order: PR #2, then PR #3, then PR #4.
 - [TASK-UI-001](tasks/TASK-UI-001-window-and-overlay-polish.md) — window and overlay polish. Accepted at `b63db9e` on
   `claude/task-ui-001-window-overlay-polish-7kg905` (draft PR #2 into the baseline branch). Verified: diff confined to
   `desktop/`, typecheck clean, desktop tests 11/11, build OK, Electron checked at 1440×900 and 1366×768.
@@ -30,10 +30,13 @@ Merge order: PR #2, then PR #3. UI feature development is stopped after TASK-UI-
   `a74dd3c` on `claude/task-ui-002-compact-controls-qc-fltloo` (draft PR #3, stacked on PR #2). Verified: diff confined
   to `desktop/src`, no dependency change, engine calls and readiness unchanged, typecheck clean, desktop tests 20/20,
   build OK, Electron checked at 1440×900 and 1366×768.
+- [TASK-UI-PERF](tasks/TASK-UI-PERF-qc-table-performance.md) — QC table performance. Accepted at `ab86620` on
+  `claude/task-ui-perf-qc-table-uzrjr8` (draft PR #4, stacked on PR #3). Verified: diff confined to `desktop/src`, no
+  dependency change, engine calls and readiness unchanged, typecheck clean, desktop tests 22/22, build OK. On a
+  6,772-row result through the real engine: ~22 table rows mounted instead of 6,772; result render ~7 s → ~90 ms.
 
 ## Active task
-- [TASK-UI-PERF](tasks/TASK-UI-PERF-qc-table-performance.md) — QC table performance (desktop UI only). Depends on
-  TASK-UI-002; in progress in its own thread, stacked on the TASK-UI-002 branch. TASK-001 stays next in the engine queue.
+None. Next: TASK-001.
 
 ## Queued tasks (in order)
 1. [TASK-001](tasks/TASK-001-golden-regression-dataset.md) — compact golden regression dataset (tests only).
@@ -59,7 +62,7 @@ Strictly sequential: 002 and 003 both edit `qc.py` and the golden expectations, 
 |---|---|---|---|
 | Python | `python -m pytest` | 150 passed, 7 skipped (real OS_A-2 sample absent) | ~2 s |
 | Python, parallel | `python -m pytest -n auto` | same | ~2 s (no gain) |
-| Desktop unit | `npm run test` (in `desktop/`) | 11 passed (20 on the TASK-UI-002 branch) | ~1 s |
+| Desktop unit | `npm run test` (in `desktop/`) | 11 passed (22 on the TASK-UI-PERF branch) | ~1 s |
 | Desktop types | `npm run typecheck` | clean | ~4 s |
 | Electron smoke / portable build | Windows only | not run | — |
 
