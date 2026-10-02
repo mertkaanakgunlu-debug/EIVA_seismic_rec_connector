@@ -714,8 +714,8 @@ type ColumnDrag = {
   geometry: { viewportLeft: number; viewportRight: number; viewportHeight: number; midpoints: number[]; edges: number[] } | null;
 };
 
-/** Rendered before the first row is measured; the real height replaces it once a row is mounted. */
-const DEFAULT_ROW_HEIGHT = 30;
+/** Row height pinned in styles.css (`tbody tr[data-index] td`); the measured height replaces it if they ever differ. */
+const DEFAULT_ROW_HEIGHT = 29;
 const ROW_OVERSCAN = 8;
 
 /**
