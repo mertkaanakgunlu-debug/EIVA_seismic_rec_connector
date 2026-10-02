@@ -4,6 +4,7 @@ import type { AnalysisResponse, AnalysisSuccess, CorrectionBlocker, EngineRecord
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
 import { formatAssociation, formatBlocker } from "./lib/presentation";
+import { FloatingTooltip, Popover } from "./Popover";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
@@ -36,13 +37,15 @@ const BASE_COLUMNS: Array<{ key: string; label: string }> = [
   { key: "target_line", label: "Target Line" },
 ];
 
-function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "download" }) {
+function Icon({ name }: { name: "left" | "right" | "folder" | "columns" | "download" | "gear" | "sliders" }) {
   const paths = {
     left: <path d="m14 6-6 6 6 6M8 12h10" />,
     right: <path d="m10 6 6 6-6 6M16 12H6" />,
     folder: <path d="M3.5 6.5h6l1.5 2h9.5v9.5h-17zM3.5 6.5v-2h5l1.5 2" />,
     columns: <><path d="M4 5h16v14H4z" /><path d="M10 5v14M16 5v14" /></>,
     download: <><path d="M12 4v10M8 10l4 4 4-4M5 19h14" /></>,
+    gear: <><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="6.5" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" /></>,
+    sliders: <><path d="M4 7h9M17 7h3M4 17h3M11 17h9" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></>,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="icon" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
@@ -53,11 +56,41 @@ function StatusMark({ lifecycle }: { lifecycle: Lifecycle }) {
 }
 
 // "RECORDER" / "EIVA" are the stored profile slots: RECORDER profiles describe the authoritative reference input, EIVA profiles the target.
-function FormatStatus({ kind, state, onConfigure }: { kind: "EIVA" | "RECORDER"; state: any; onConfigure: () => void }) {
+function formatReadiness(state: any) {
   const profile = state?.profile as FormatProfileSummary | undefined;
   const ready = Boolean(profile && state?.validation?.valid && profile.confidence !== "Unresolved");
   const label = profile ? (ready ? "Ready" : profile.confidence === "Review recommended" ? "Needs review" : "Not ready") : state?.error ? "Not ready" : "Inspecting…";
-  return <div className="format-status" aria-live="polite"><span className="format-role">Format</span><strong>{profile?.name || (kind === "EIVA" ? "Target format" : "Reference format")}</strong><span className={`format-state ${ready ? "format-ready" : "format-review"}`}>{ready ? "✓" : "!"} {label}</span><button className="button secondary compact-button" onClick={onConfigure} disabled={!profile}>Configure</button></div>;
+  return { profile, ready, label };
+}
+
+/** Subordinate, inline readiness of the detected input format; shown inside the file field. */
+function FormatBadge({ kind, state }: { kind: "EIVA" | "RECORDER"; state: any }) {
+  const { profile, ready, label } = formatReadiness(state);
+  const name = profile?.name || (kind === "EIVA" ? "Target format" : "Reference format");
+  return <span className={`format-badge ${ready ? "format-ready" : "format-review"}`} aria-live="polite" title={`Format: ${name} (${label})`}>
+    <span aria-hidden="true">{ready ? "✓" : "!"}</span><span className="format-badge-name">{ready ? name : label}</span>
+  </span>;
+}
+
+function ConfigureFormatButton({ kind, state, onConfigure }: { kind: "EIVA" | "RECORDER"; state: any; onConfigure: () => void }) {
+  const { profile } = formatReadiness(state);
+  const label = `Configure ${kind === "EIVA" ? "target (EIVA)" : "reference (recorder)"} format`;
+  return <button className="button secondary icon-only-button" onClick={onConfigure} disabled={!profile} aria-label={label} title={profile ? `${label}: ${profile.name}` : label}><Icon name="gear" /></button>;
+}
+
+/** The shot interval drives QC distance bands and the alignment distance cap; it lives in a compact settings panel. */
+function AnalysisSettings({ value, onChange, valid, interval }: { value: string; onChange: (value: string) => void; valid: boolean; interval: number }) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  return <>
+    <button ref={buttonRef} className={`settings-button${valid ? "" : " is-invalid"}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((current) => !current)} title={valid ? `Shot Interval ${interval} m` : "Shot Interval needs a finite positive value"}><Icon name="sliders" />Settings</button>
+    {open && <Popover anchorRef={buttonRef} onClose={() => setOpen(false)} className="settings-panel" role="dialog" aria-label="Analysis settings">
+      <strong>Analysis settings</strong>
+      <div className="settings-field"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={value} onChange={(event) => onChange(event.target.value)} aria-invalid={value.length > 0 && !valid} /><span className="unit">m</span></div>
+      <p className="tolerance-readout" title="The shot interval sets QC distance bands only; it never rejects a recorder record">QC normal distance ≤ <b>{valid ? `${(interval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></p>
+      <p className="settings-note">The shot interval sets QC distance bands only; it never rejects a recorder record. Re-analyse after changing it.</p>
+    </Popover>}
+  </>;
 }
 
 type PreviewMode = "first" | "random" | "last" | "raw";
@@ -128,14 +161,15 @@ function CorrectionDetails({ blockers, onClose }: { blockers: CorrectionBlocker[
 function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (value: ThemePreference) => void }) {
   useRenderDiagnostics("ThemePicker");
   const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => { diagnosticPhase(`theme-picker-open:${open}`); }, [open]);
   const options: Array<[ThemePreference, string]> = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
   return <div className="theme-picker">
     <span>Theme</span>
-    <button className="theme-picker-button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{options.find(([key]) => key === value)?.[1] || "System"}<span aria-hidden="true">⌄</span></button>
-    {open && <div className="theme-picker-menu" role="listbox" aria-label="Theme preference">
+    <button ref={buttonRef} className="theme-picker-button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{options.find(([key]) => key === value)?.[1] || "System"}<span aria-hidden="true">⌄</span></button>
+    {open && <Popover anchorRef={buttonRef} onClose={() => setOpen(false)} matchAnchorWidth className="theme-picker-menu" role="listbox" aria-label="Theme preference">
       {options.map(([key, label]) => <button key={key} role="option" aria-selected={key === value} onClick={() => { markTiming("theme-option-selected"); onChange(key); setOpen(false); }}>{label}</button>)}
-    </div>}
+    </Popover>}
   </div>;
 }
 
@@ -169,7 +203,7 @@ export default function App() {
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelineCanvasRef = useRef<HTMLCanvasElement>(null);
   const tableViewportRef = useRef<HTMLDivElement>(null);
-  const columnsWrapRef = useRef<HTMLDivElement>(null);
+  const columnsButtonRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef({ active: false, moved: false, x: 0, scrollLeft: 0 });
 
   const theme = resolveThemePreference(themePreference, systemDark);
@@ -195,14 +229,6 @@ export default function App() {
     return () => media.removeEventListener?.("change", onChange);
   }, []);
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(""), 3600); return () => window.clearTimeout(timer); }, [toast]);
-  useEffect(() => {
-    if (!columnsOpen) return;
-    const closeOutside = (event: globalThis.MouseEvent) => {
-      if (columnsWrapRef.current && !columnsWrapRef.current.contains(event.target as Node)) setColumnsOpen(false);
-    };
-    document.addEventListener("mousedown", closeOutside);
-    return () => document.removeEventListener("mousedown", closeOutside);
-  }, [columnsOpen]);
   useEffect(() => { if (analysis) markTiming("analysis-state-assigned"); }, [analysis]);
   useEffect(() => {
     if (!analysis || !diagnosticsEnabled) return;
@@ -302,7 +328,7 @@ export default function App() {
     diagnosticPhase("analyse-entered");
     markTiming("analyse-request-start");
     setError("");
-    if (!validShotInterval) { setError("Enter a finite positive Shot Interval before analysing."); setLifecycle("failed"); return; }
+    if (!validShotInterval) { setError("Enter a finite positive Shot Interval in Settings before analysing."); setLifecycle("failed"); return; }
     if (formatBlocked || formatNeedsReview) { setError(formatBlocked ? "Format not ready — configure the input mapping before analysing." : "Format needs review — open Configure and confirm the interpretation before analysing."); setLifecycle("failed"); return; }
     if (!referencePath && !targetPath) { setError("Select both a reference (recorder) log and a target (EIVA) log before analysing."); setLifecycle("failed"); return; }
     if (!referencePath) { setError("Select a reference (recorder) log before analysing."); setLifecycle("failed"); return; }
@@ -395,7 +421,7 @@ export default function App() {
     const text = record.association === "ASSIGNED"
       ? `Recorder ${record.reference_ffid} → Target ${record.target_ffid}\nCorrected FFID ${record.corrected_ffid}\n${getCellValue(record, "distance")} m · ${getCellValue(record, "qc")}`
       : `${formatAssociation(record.association)}\n${record.target_ffid ? `Target ${record.target_ffid}` : `Recorder ${record.reference_ffid}`}`;
-    setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: text + jumpDetail });
+    setTimelineTooltip({ x: event.clientX, y: event.clientY, text: text + jumpDetail });
   };
   const handleTimelineLeave = () => setTimelineTooltip(null);
 
@@ -428,7 +454,7 @@ export default function App() {
 
   const columns = useMemo(() => visibleColumns.map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
-    // The eight default columns total ~1130 px so the QC column is visible in the default 1280 px window.
+    // The eight default columns total ~1135 px so the QC column is visible in the default window without horizontal scrolling.
     const fixedWidths: Record<string, number> = { reference_ffid: 105, target_ffid: 150, corrected_ffid: 115, reference_coord: 170, target_coord: 170, distance: 100, association: 110, qc: 215 };
     const width = fixedWidths[key] ?? (key === "diagnostic" || key.startsWith("target_raw:") ? 220 : 130);
     return { id: key, header: spec.label, alignment: columnAlignment(key), width };
@@ -449,16 +475,13 @@ export default function App() {
   return <div className="app-shell" data-diagnostics-isolation={isolation}>
     <header className="app-header">
       <div><h1>ShotLogFixer</h1><p>Seismic acquisition QC</p></div>
-      <div className="header-actions"><StatusMark lifecycle={lifecycle} /><ThemePicker value={themePreference} onChange={setThemePreference} /></div>
+      <div className="header-actions"><StatusMark lifecycle={lifecycle} /><AnalysisSettings value={shotIntervalText} onChange={setShotIntervalText} valid={validShotInterval} interval={shotInterval} /><ThemePicker value={themePreference} onChange={setThemePreference} /></div>
     </header>
 
     <main>
       <section className="input-section" aria-label="Input files">
-        <div className="file-row"><label htmlFor="reference-path" title="Authoritative: every valid record is a real shot and its FFID is the reference FFID">Reference (Recorder)</label><input id="reference-path" value={referencePath ? basename(referencePath) : "No file selected"} readOnly title={referencePath} className={!referencePath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("reference")}>Browse</button></div>
-        <div className="file-row"><label htmlFor="target-path" title="Corrected: a copy of this file receives the recorder FFIDs; unassigned rows are removed">Target (EIVA)</label><input id="target-path" value={targetPath ? basename(targetPath) : "No file selected"} readOnly title={targetPath} className={!targetPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("target")}>Browse</button></div>
-        <FormatStatus kind="RECORDER" state={formatStates.reference} onConfigure={() => setFormatDetails("reference")} />
-        <FormatStatus kind="EIVA" state={formatStates.target} onConfigure={() => setFormatDetails("target")} />
-        <div className="shot-interval-row"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={shotIntervalText} onChange={(event) => setShotIntervalText(event.target.value)} aria-invalid={shotIntervalText.length > 0 && !validShotInterval} /><span className="unit">m</span><span className="tolerance-readout" title="The shot interval sets QC distance bands only; it never rejects a recorder record">QC normal distance ≤ <b>{validShotInterval ? `${(shotInterval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></span></div>
+        <div className="file-row"><label htmlFor="reference-path" title="Authoritative: every valid record is a real shot and its FFID is the reference FFID">Reference (Recorder)</label><div className="file-field"><input id="reference-path" value={referencePath ? basename(referencePath) : "No file selected"} readOnly title={referencePath} className={!referencePath ? "placeholder" : ""} />{referencePath && <FormatBadge kind="RECORDER" state={formatStates.reference} />}</div><button className="button secondary" onClick={() => chooseFile("reference")}>Browse</button><ConfigureFormatButton kind="RECORDER" state={formatStates.reference} onConfigure={() => setFormatDetails("reference")} /></div>
+        <div className="file-row"><label htmlFor="target-path" title="Corrected: a copy of this file receives the recorder FFIDs; unassigned rows are removed">Target (EIVA)</label><div className="file-field"><input id="target-path" value={targetPath ? basename(targetPath) : "No file selected"} readOnly title={targetPath} className={!targetPath ? "placeholder" : ""} />{targetPath && <FormatBadge kind="EIVA" state={formatStates.target} />}</div><button className="button secondary" onClick={() => chooseFile("target")}>Browse</button><ConfigureFormatButton kind="EIVA" state={formatStates.target} onConfigure={() => setFormatDetails("target")} /></div>
         <div className="input-actions">
           <button className="button primary analyse-button" onClick={analyse} disabled={lifecycle === "running" || formatBlocked || formatNeedsReview}>{lifecycle === "running" ? "ANALYSING" : "ANALYSE"}</button>
           <div className="output-actions" aria-label="Output actions">
@@ -469,7 +492,7 @@ export default function App() {
       </section>
 
       {error && <div className="error-line" role="alert"><strong>{lifecycle === "failed" ? "Analysis issue" : "Export issue"}</strong><span>{error}</span></div>}
-      {(analysisStale || profileStale) && <div className="stale-line" role="status"><strong>Analysis settings changed — re-analyse</strong><span>Output actions are disabled until Shot Interval and input format profiles match the analysed values.</span></div>}
+      {(analysisStale || profileStale) && <div className="stale-line" role="status"><strong>Analysis settings changed — re-analyse</strong><span>Output actions are disabled until the Shot Interval (Settings) and input format profiles match the analysed values.</span></div>}
       {formatDetails && <FormatDialog kind={formatDetails === "target" ? "EIVA" : "RECORDER"} filePath={formatDetails === "target" ? targetPath : referencePath} state={formatStates[formatDetails]} onCancel={() => setFormatDetails(null)} onUse={(profile) => { const active = { ...profile, profile_hash: "" }; setFormatOverrides((current) => ({ ...current, [formatDetails]: active })); setFormatStates((current) => ({ ...current, [formatDetails]: { ...current[formatDetails], profile: active } })); setFormatDetails(null); }} onSave={(profile) => { const name = window.prompt("Save format profile as", profile?.name || "My format"); if (name) void window.shotlogfixer.saveFormatProfile(profile, name); }} />}
 
       <section className="summary-section" aria-label="Analysis summary">
@@ -501,12 +524,12 @@ export default function App() {
         <div className="section-heading"><h2>Acquisition timeline</h2><span>Positions {analysis ? `${visibleStart}–${visibleEnd} of ${timelineTotal}` : "—"}</span></div>
         <div className="timeline-viewport" ref={timelineRef} onClick={handleTimelineClick} onScroll={handleTimelineScroll} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
           <canvas ref={timelineCanvasRef} className="timeline-canvas" width={timelineTrackWidth} height={60} style={{ width: timelineTrackWidth, height: 60 }} onMouseMove={handleTimelineMove} onMouseLeave={handleTimelineLeave} aria-label="Acquisition timeline" />
-          {timelineTooltip && <div className="timeline-tooltip" style={{ left: timelineTooltip.x + timelineLeft, top: timelineTooltip.y }}>{timelineTooltip.text}</div>}
+          {timelineTooltip && <FloatingTooltip x={timelineTooltip.x} y={timelineTooltip.y} className="timeline-tooltip">{timelineTooltip.text}</FloatingTooltip>}
         </div>
       </section>
 
       <section className="table-section" aria-label="QC detail">
-        <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap" ref={columnsWrapRef}><button className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <div className="columns-popover"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div></div>}</div></div>
+        <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap"><button ref={columnsButtonRef} className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <Popover anchorRef={columnsButtonRef} onClose={() => setColumnsOpen(false)} className="columns-popover" role="dialog" aria-label="Visible columns"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div></Popover>}</div></div>
         <div className="table-viewport" ref={tableViewportRef}>
           <table style={{ minWidth: columns.reduce((sum, column) => sum + column.width, 0) }}>
             <colgroup>{columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>

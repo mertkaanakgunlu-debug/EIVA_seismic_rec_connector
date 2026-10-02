@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen } from "electron";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
@@ -64,12 +64,29 @@ function runEngine(payload: Record<string, unknown>, label = String(payload.acti
   });
 }
 
+// Preferred size shows the whole primary interface; smaller work areas (laptops) get the full work area instead.
+const PREFERRED_WINDOW = { width: 1440, height: 900 };
+const MINIMUM_WINDOW = { width: 960, height: 620 };
+
+function initialWindowBounds() {
+  const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const width = Math.min(PREFERRED_WINDOW.width, workArea.width);
+  const height = Math.min(PREFERRED_WINDOW.height, workArea.height);
+  return {
+    x: workArea.x + Math.round((workArea.width - width) / 2),
+    y: workArea.y + Math.round((workArea.height - height) / 2),
+    width,
+    height,
+    minWidth: Math.min(MINIMUM_WINDOW.width, workArea.width),
+    minHeight: Math.min(MINIMUM_WINDOW.height, workArea.height),
+    maximize: width < PREFERRED_WINDOW.width || height < PREFERRED_WINDOW.height,
+  };
+}
+
 function createWindow() {
+  const { maximize, ...bounds } = initialWindowBounds();
   const window = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 980,
-    minHeight: 640,
+    ...bounds,
     backgroundColor: "#0d1117",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -82,6 +99,7 @@ function createWindow() {
       ] : [],
     },
   });
+  if (maximize) window.maximize();
   const devUrlArg = process.argv.find((argument) => argument.startsWith("--dev-url="));
   const devUrl = devUrlArg?.slice("--dev-url=".length);
   if (!app.isPackaged && devUrl) {
