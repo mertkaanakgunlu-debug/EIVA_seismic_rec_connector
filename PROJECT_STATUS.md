@@ -32,7 +32,8 @@ Merge order: PR #2, then PR #3. UI feature development is stopped after TASK-UI-
   build OK, Electron checked at 1440×900 and 1366×768.
 
 ## Active task
-None. Next: TASK-001.
+- [TASK-UI-PERF](tasks/TASK-UI-PERF-qc-table-performance.md) — QC table performance (desktop UI only). Depends on
+  TASK-UI-002; in progress in its own thread, stacked on the TASK-UI-002 branch. TASK-001 stays next in the engine queue.
 
 ## Queued tasks (in order)
 1. [TASK-001](tasks/TASK-001-golden-regression-dataset.md) — compact golden regression dataset (tests only).
