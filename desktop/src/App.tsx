@@ -4,6 +4,7 @@ import type { AnalysisResponse, AnalysisSuccess, CorrectionBlocker, EngineRecord
 import "./styles.css";
 import { diagnosticOptions, diagnosticPhase, diagnosticsEnabled, useRenderDiagnostics } from "./lib/diagnostics";
 import { formatAssociation, formatBlocker } from "./lib/presentation";
+import { FloatingTooltip, Popover } from "./Popover";
 
 type Lifecycle = "idle" | "running" | "done" | "failed";
 type ThemePreference = "system" | "light" | "dark";
@@ -128,14 +129,15 @@ function CorrectionDetails({ blockers, onClose }: { blockers: CorrectionBlocker[
 function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (value: ThemePreference) => void }) {
   useRenderDiagnostics("ThemePicker");
   const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => { diagnosticPhase(`theme-picker-open:${open}`); }, [open]);
   const options: Array<[ThemePreference, string]> = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
   return <div className="theme-picker">
     <span>Theme</span>
-    <button className="theme-picker-button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{options.find(([key]) => key === value)?.[1] || "System"}<span aria-hidden="true">⌄</span></button>
-    {open && <div className="theme-picker-menu" role="listbox" aria-label="Theme preference">
+    <button ref={buttonRef} className="theme-picker-button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{options.find(([key]) => key === value)?.[1] || "System"}<span aria-hidden="true">⌄</span></button>
+    {open && <Popover anchorRef={buttonRef} onClose={() => setOpen(false)} matchAnchorWidth className="theme-picker-menu" role="listbox" aria-label="Theme preference">
       {options.map(([key, label]) => <button key={key} role="option" aria-selected={key === value} onClick={() => { markTiming("theme-option-selected"); onChange(key); setOpen(false); }}>{label}</button>)}
-    </div>}
+    </Popover>}
   </div>;
 }
 
@@ -169,7 +171,7 @@ export default function App() {
   const timelineRef = useRef<HTMLDivElement>(null);
   const timelineCanvasRef = useRef<HTMLCanvasElement>(null);
   const tableViewportRef = useRef<HTMLDivElement>(null);
-  const columnsWrapRef = useRef<HTMLDivElement>(null);
+  const columnsButtonRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef({ active: false, moved: false, x: 0, scrollLeft: 0 });
 
   const theme = resolveThemePreference(themePreference, systemDark);
@@ -195,14 +197,6 @@ export default function App() {
     return () => media.removeEventListener?.("change", onChange);
   }, []);
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(""), 3600); return () => window.clearTimeout(timer); }, [toast]);
-  useEffect(() => {
-    if (!columnsOpen) return;
-    const closeOutside = (event: globalThis.MouseEvent) => {
-      if (columnsWrapRef.current && !columnsWrapRef.current.contains(event.target as Node)) setColumnsOpen(false);
-    };
-    document.addEventListener("mousedown", closeOutside);
-    return () => document.removeEventListener("mousedown", closeOutside);
-  }, [columnsOpen]);
   useEffect(() => { if (analysis) markTiming("analysis-state-assigned"); }, [analysis]);
   useEffect(() => {
     if (!analysis || !diagnosticsEnabled) return;
@@ -395,7 +389,7 @@ export default function App() {
     const text = record.association === "ASSIGNED"
       ? `Recorder ${record.reference_ffid} → Target ${record.target_ffid}\nCorrected FFID ${record.corrected_ffid}\n${getCellValue(record, "distance")} m · ${getCellValue(record, "qc")}`
       : `${formatAssociation(record.association)}\n${record.target_ffid ? `Target ${record.target_ffid}` : `Recorder ${record.reference_ffid}`}`;
-    setTimelineTooltip({ x: event.clientX - (timelineRef.current.getBoundingClientRect().left), y: event.clientY - timelineRef.current.getBoundingClientRect().top - 7, text: text + jumpDetail });
+    setTimelineTooltip({ x: event.clientX, y: event.clientY, text: text + jumpDetail });
   };
   const handleTimelineLeave = () => setTimelineTooltip(null);
 
@@ -428,7 +422,7 @@ export default function App() {
 
   const columns = useMemo(() => visibleColumns.map((key) => {
     const spec = allColumns.find((column) => column.key === key) || { key, label: key };
-    // The eight default columns total ~1130 px so the QC column is visible in the default 1280 px window.
+    // The eight default columns total ~1135 px so the QC column is visible in the default window without horizontal scrolling.
     const fixedWidths: Record<string, number> = { reference_ffid: 105, target_ffid: 150, corrected_ffid: 115, reference_coord: 170, target_coord: 170, distance: 100, association: 110, qc: 215 };
     const width = fixedWidths[key] ?? (key === "diagnostic" || key.startsWith("target_raw:") ? 220 : 130);
     return { id: key, header: spec.label, alignment: columnAlignment(key), width };
@@ -455,8 +449,8 @@ export default function App() {
     <main>
       <section className="input-section" aria-label="Input files">
         <div className="file-row"><label htmlFor="reference-path" title="Authoritative: every valid record is a real shot and its FFID is the reference FFID">Reference (Recorder)</label><input id="reference-path" value={referencePath ? basename(referencePath) : "No file selected"} readOnly title={referencePath} className={!referencePath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("reference")}>Browse</button></div>
-        <div className="file-row"><label htmlFor="target-path" title="Corrected: a copy of this file receives the recorder FFIDs; unassigned rows are removed">Target (EIVA)</label><input id="target-path" value={targetPath ? basename(targetPath) : "No file selected"} readOnly title={targetPath} className={!targetPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("target")}>Browse</button></div>
         <FormatStatus kind="RECORDER" state={formatStates.reference} onConfigure={() => setFormatDetails("reference")} />
+        <div className="file-row"><label htmlFor="target-path" title="Corrected: a copy of this file receives the recorder FFIDs; unassigned rows are removed">Target (EIVA)</label><input id="target-path" value={targetPath ? basename(targetPath) : "No file selected"} readOnly title={targetPath} className={!targetPath ? "placeholder" : ""} /><button className="button secondary" onClick={() => chooseFile("target")}>Browse</button></div>
         <FormatStatus kind="EIVA" state={formatStates.target} onConfigure={() => setFormatDetails("target")} />
         <div className="shot-interval-row"><label htmlFor="shot-interval">Shot Interval</label><input id="shot-interval" inputMode="decimal" value={shotIntervalText} onChange={(event) => setShotIntervalText(event.target.value)} aria-invalid={shotIntervalText.length > 0 && !validShotInterval} /><span className="unit">m</span><span className="tolerance-readout" title="The shot interval sets QC distance bands only; it never rejects a recorder record">QC normal distance ≤ <b>{validShotInterval ? `${(shotInterval / 2).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")} m` : "—"}</b></span></div>
         <div className="input-actions">
@@ -501,12 +495,12 @@ export default function App() {
         <div className="section-heading"><h2>Acquisition timeline</h2><span>Positions {analysis ? `${visibleStart}–${visibleEnd} of ${timelineTotal}` : "—"}</span></div>
         <div className="timeline-viewport" ref={timelineRef} onClick={handleTimelineClick} onScroll={handleTimelineScroll} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
           <canvas ref={timelineCanvasRef} className="timeline-canvas" width={timelineTrackWidth} height={60} style={{ width: timelineTrackWidth, height: 60 }} onMouseMove={handleTimelineMove} onMouseLeave={handleTimelineLeave} aria-label="Acquisition timeline" />
-          {timelineTooltip && <div className="timeline-tooltip" style={{ left: timelineTooltip.x + timelineLeft, top: timelineTooltip.y }}>{timelineTooltip.text}</div>}
+          {timelineTooltip && <FloatingTooltip x={timelineTooltip.x} y={timelineTooltip.y} className="timeline-tooltip">{timelineTooltip.text}</FloatingTooltip>}
         </div>
       </section>
 
       <section className="table-section" aria-label="QC detail">
-        <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap" ref={columnsWrapRef}><button className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <div className="columns-popover"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div></div>}</div></div>
+        <div className="section-heading table-heading"><h2>QC detail</h2><div className="columns-wrap"><button ref={columnsButtonRef} className="button secondary compact-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><Icon name="columns" />Columns</button>{columnsOpen && <Popover anchorRef={columnsButtonRef} onClose={() => setColumnsOpen(false)} className="columns-popover" role="dialog" aria-label="Visible columns"><strong>Visible columns</strong><div className="column-list">{allColumns.map((column) => <label key={column.key}><input type="checkbox" checked={visibleColumns.includes(column.key)} onChange={() => setVisibleColumns((current) => current.includes(column.key) ? current.filter((key) => key !== column.key) : [...current, column.key])} />{column.label}</label>)}</div></Popover>}</div></div>
         <div className="table-viewport" ref={tableViewportRef}>
           <table style={{ minWidth: columns.reduce((sum, column) => sum + column.width, 0) }}>
             <colgroup>{columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>
